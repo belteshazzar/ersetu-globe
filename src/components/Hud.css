@@ -1,0 +1,88 @@
+.hud {
+  position: absolute;
+  top: 1.5rem;
+  left: 1.5rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid rgba(120, 190, 255, 0.2);
+  border-radius: 0.5rem;
+  background: rgba(8, 14, 26, 0.65);
+  backdrop-filter: blur(6px);
+  font-size: 0.8125rem;
+  user-select: none;
+}
+
+.hud__title {
+  margin: 0 0 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(160, 210, 255, 0.9);
+}
+
+.hud__readout {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0.15rem 0.75rem;
+  margin: 0 0 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud__readout dt {
+  color: rgba(160, 210, 255, 0.55);
+}
+
+.hud__readout dd {
+  margin: 0;
+  text-align: right;
+}
+
+.hud__cursor {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.9rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid rgba(120, 190, 255, 0.15);
+}
+
+.hud__cursor-label {
+  color: rgba(160, 210, 255, 0.55);
+}
+
+.hud__cursor-value {
+  font-variant-numeric: tabular-nums;
+  /* Reserve the width of a full reading so the panel does not jitter as the
+     numbers change. */
+  min-width: 8.5em;
+  text-align: right;
+}
+
+.hud__controls {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.hud__controls button {
+  flex: 1;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid rgba(120, 190, 255, 0.25);
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.hud__controls button:hover {
+  border-color: rgba(120, 190, 255, 0.5);
+  background: rgba(120, 190, 255, 0.08);
+}
+
+.hud__hint {
+  margin: 0.75rem 0 0;
+  font-size: 0.6875rem;
+  color: rgba(160, 210, 255, 0.4);
+}
