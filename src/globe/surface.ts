@@ -45,9 +45,13 @@ import {
 export type SurfaceImage = {
   // Explicitly backed by an ArrayBuffer (not SharedArrayBuffer) so the
   // buffer can be handed straight to the ImageData constructor.
-  sea: Uint8ClampedArray<ArrayBuffer>
-  /** Null when there is no elevation, in which case land stays a hole. */
-  land: Uint8ClampedArray<ArrayBuffer> | null
+  pixels: Uint8ClampedArray<ArrayBuffer>
+  /**
+   * Whether this is displaced terrain, already coloured land and sea, or the
+   * bare sphere - which still needs its land cutting out with the coastline
+   * geometry, because there is no elevation to say where the land is.
+   */
+  terrain: boolean
   /** Buffer dimensions, in shading samples. */
   width: number
   height: number
@@ -140,8 +144,7 @@ const DEPTH_DARKEN = 0.3
  */
 const MIN_COS_LAT = 0.02
 
-let seaBuffer: Uint8ClampedArray<ArrayBuffer> | null = null
-let landBuffer: Uint8ClampedArray<ArrayBuffer> | null = null
+let pixelBuffer: Uint8ClampedArray<ArrayBuffer> | null = null
 
 // Scratch, reused every sample.
 const relief: Relief = { height: 0, east: 0, north: 0 }
@@ -191,26 +194,18 @@ export function shadeSurface(
   const height = Math.max(1, Math.round(cssH * scale))
 
   const needed = width * height * 4
-  if (!seaBuffer || seaBuffer.length < needed) {
-    seaBuffer = new Uint8ClampedArray(needed)
+  if (!pixelBuffer || pixelBuffer.length < needed) {
+    pixelBuffer = new Uint8ClampedArray(needed)
   }
-  const sea = seaBuffer
-  sea.fill(0, 0, needed)
-
-  let land: Uint8ClampedArray<ArrayBuffer> | null = null
-  if (grid && mesh) {
-    if (!landBuffer || landBuffer.length < needed) {
-      landBuffer = new Uint8ClampedArray(needed)
-    }
-    land = landBuffer
-    land.fill(0, 0, needed)
-  }
+  const pixels = pixelBuffer
+  pixels.fill(0, 0, needed)
 
   const stepX = cssW / width
   const stepY = cssH / height
-  const image = { sea, land, width, height, x: x0, y: y0, w: cssW, h: cssH }
+  const terrain = Boolean(grid && mesh)
+  const image = { pixels, terrain, width, height, x: x0, y: y0, w: cssW, h: cssH }
 
-  if (grid && mesh && land) {
+  if (grid && mesh) {
     shadeTerrain(camera, grid, mesh, image, stepX, stepY, exaggeration)
   } else {
     shadeSphere(camera, image, stepX, stepY, scale)
@@ -243,7 +238,7 @@ function shadeSphere(
   scale: number,
 ) {
   const { cx, cy, radius } = camera
-  const { sea, width, height, x: x0, y: y0 } = image
+  const { pixels, width, height, x: x0, y: y0 } = image
 
   const feather = Math.min(0.5, 1.5 / (radius * scale))
   const featherStart = (1 - feather) * (1 - feather)
@@ -265,10 +260,10 @@ function shadeSphere(
       const fresnel = fresnelAt(nz)
 
       environment(nz * ny + 0.5)
-      sea[index] = env[0] * base + fresnel * RIM_TINT[0]
-      sea[index + 1] = env[1] * base + fresnel * RIM_TINT[1]
-      sea[index + 2] = env[2] * base + fresnel * RIM_TINT[2]
-      sea[index + 3] =
+      pixels[index] = env[0] * base + fresnel * RIM_TINT[0]
+      pixels[index + 1] = env[1] * base + fresnel * RIM_TINT[1]
+      pixels[index + 2] = env[2] * base + fresnel * RIM_TINT[2]
+      pixels[index + 3] =
         r2 > featherStart ? 255 * Math.min(1, (1 - Math.sqrt(r2)) / feather) : 255
     }
   }
@@ -289,8 +284,7 @@ function shadeTerrain(
   exaggeration: number,
 ) {
   const { cx, cy, radius, cosLon, sinLon, cosLat, sinLat } = camera
-  const { sea, land, width, height, x: x0, y: y0 } = image
-  if (!land) return
+  const { pixels, width, height, x: x0, y: y0 } = image
 
   const place = placeBuffer(camera, x0, y0, stepX, stepY)
   const gbuffer = getGBuffer(width, height)
@@ -352,35 +346,52 @@ function shadeTerrain(
       const shade = tilted - flat
       const elevation = relief.height
 
-      const deep = elevation < 0 ? Math.min(1, -elevation / FULL_DEPTH) : 0
-      const seaGain = base * (1 - DEPTH_DARKEN * deep) + SEA_RELIEF * shade
-      // The rasteriser decides coverage per whole sample, so the silhouette
-      // comes out as a staircase. Counting how many of the four neighbours were
-      // also covered approximates how much of this sample the surface actually
-      // fills, which softens the edge to something the upscale can carry - a
-      // sample walled in on all sides stays solid, one clinging to the rim
-      // fades. Only the outline is affected; interior samples all score four.
-      let covered = 4
-      if (bx === 0 || depth[sample - 1] === NOT_COVERED) covered--
-      if (bx === width - 1 || depth[sample + 1] === NOT_COVERED) covered--
-      if (by === 0 || depth[sample - width] === NOT_COVERED) covered--
-      if (by === height - 1 || depth[sample + width] === NOT_COVERED) covered--
-      const alpha = covered === 4 ? 255 : 64 + covered * 48
-
-      sea[index] = env[0] * seaGain + fresnel * RIM_TINT[0]
-      sea[index + 1] = env[1] * seaGain + fresnel * RIM_TINT[1]
-      sea[index + 2] = env[2] * seaGain + fresnel * RIM_TINT[2]
-      sea[index + 3] = alpha
+      // Land or sea comes from the same sample that displaced the ground, so
+      // the colour cannot drift away from the shape the way a coastline
+      // projected onto the undisplaced sphere does - which showed up as a rim
+      // of sea colour around every continent, worst at the limb, where the
+      // displacement is entirely sideways.
+      //
+      // The crossing is softened over about a grid cell either side, measured
+      // by how fast the height is changing: a steep coast gets a hard edge, a
+      // shallow one a wider blend, and both stay smooth under magnification.
+      const slope = Math.abs(relief.east) + Math.abs(relief.north) + 1
+      let landness = 0.5 + elevation / slope
+      if (landness < 0) landness = 0
+      else if (landness > 1) landness = 1
 
       let ramp = elevation > 0 ? (elevation * RAMP_SCALE) | 0 : 0
       if (ramp >= RAMP_SIZE) ramp = RAMP_SIZE - 1
       ramp *= 3
       const landGain = 1 + LAND_RELIEF * shade + 0.12 * (flat > 0 ? flat : 0)
 
-      land[index] = landRamp[ramp] * landGain
-      land[index + 1] = landRamp[ramp + 1] * landGain
-      land[index + 2] = landRamp[ramp + 2] * landGain
-      land[index + 3] = alpha
+      const deep = elevation < 0 ? Math.min(1, -elevation / FULL_DEPTH) : 0
+      const seaGain = base * (1 - DEPTH_DARKEN * deep) + SEA_RELIEF * shade
+      const wet = 1 - landness
+
+      // The rasteriser decides coverage per whole sample, so the silhouette
+      // comes out as a staircase. Counting how many of the four neighbours were
+      // also covered approximates how much of this sample the surface actually
+      // fills. Only the outline is affected; interior samples all score four.
+      // The ramp is deliberately shallow - seen edge on at the limb, terrain
+      // makes a thin ragged profile where many samples are edge samples, and a
+      // steep ramp turns that whole rim translucent.
+      let covered = 4
+      if (bx === 0 || depth[sample - 1] === NOT_COVERED) covered--
+      if (bx === width - 1 || depth[sample + 1] === NOT_COVERED) covered--
+      if (by === 0 || depth[sample - width] === NOT_COVERED) covered--
+      if (by === height - 1 || depth[sample + width] === NOT_COVERED) covered--
+
+      pixels[index] =
+        (env[0] * seaGain + fresnel * RIM_TINT[0]) * wet +
+        landRamp[ramp] * landGain * landness
+      pixels[index + 1] =
+        (env[1] * seaGain + fresnel * RIM_TINT[1]) * wet +
+        landRamp[ramp + 1] * landGain * landness
+      pixels[index + 2] =
+        (env[2] * seaGain + fresnel * RIM_TINT[2]) * wet +
+        landRamp[ramp + 2] * landGain * landness
+      pixels[index + 3] = covered === 4 ? 255 : 176 + covered * 20
     }
   }
 }

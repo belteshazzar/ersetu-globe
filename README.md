@@ -33,16 +33,13 @@ Everything is drawn into one canvas, in layers:
 1. **The displaced globe is rasterised** by a small software z-buffer into a
    G-buffer of grid coordinates and depth — real geometry, so real silhouette,
    parallax and occlusion.
-2. **The sea is shaded** from that per pixel — an environment reflection looked
-   up by the reflected ray's height, plus a Fresnel rim, darkened with depth
-   and lit by the sea floor's own slope. It runs at a fraction of display
-   resolution and is scaled up on blit; it is all smooth gradient, so nothing
-   is lost.
-3. **Land is filled** with a second shaded buffer, using the real coastline
-   geometry as the fill rather than a bitmask, which keeps the edge aligned
-   with the stroked outline and lets the canvas antialias it.
-4. **Coastlines and the graticule** are stroked as vectors at full resolution.
-5. **Overlays** — surface geometry, then orbits, then labels.
+2. **Land and sea are shaded** from that per pixel, in one pass — the sea an
+   environment reflection looked up by the reflected ray's height plus a
+   Fresnel rim, darkened with depth; land a height ramp. Which of the two a
+   sample gets comes from the same elevation that gave it its shape. It runs at
+   a fraction of display resolution and is scaled up on blit.
+3. **Coastlines and the graticule** are stroked as vectors at full resolution.
+4. **Overlays** — surface geometry, then orbits, then labels.
 
 Geometry is baked onto the unit sphere once at load, so no per-frame
 trigonometry touches the point data; a frame only builds a camera rotation and
@@ -111,11 +108,26 @@ depth; land gets a height ramp — four stops in `LAND_STOPS`, cool and dark
 rather than an atlas green-and-brown, since the relief should read from the
 shading. Change those stops for a physical-atlas palette.
 
-The whole displaced globe costs about twice a smooth-sphere frame, and rather
-less than the same relief did as a lighting trick: reading grid coordinates the
-rasteriser already interpolated is cheaper than recovering them per pixel, and
-only covered samples are shaded. `LON_STEPS`/`LAT_STEPS` trade geometric detail
-against cost; `SHADE.scale` in `renderer.ts` trades shading resolution.
+Which of the two a sample gets comes from the elevation, not from the coastline
+polygons. Filling those instead is tempting — they are the crisper outline, and
+it is what the smooth globe does — but they are projected onto the undisplaced
+sphere, and the terrain is not on it. Radial displacement barely moves anything
+at the centre of the disc, where it points at the viewer, but at the limb it is
+entirely sideways: exactly there the ground stands outside its own polygon, and
+past the radius-1 limb the fill is clipped away altogether. The result was a rim
+of sea colour around every continent, worst where the relief was most visible.
+Reading land and sea from the grid that displaced the ground cannot drift from
+it. The crossing is softened over about a cell either side, scaled by how fast
+the height is changing, so a steep coast gets a hard edge and a shallow one a
+wider blend. The vector coastline is still stroked over the top.
+
+The whole displaced globe costs around a third again over a smooth-sphere
+frame, and less than the same relief did as a lighting trick: reading grid
+coordinates the rasteriser already interpolated is cheaper than recovering them
+per pixel, only covered samples are shaded, and colouring land from the grid
+retired a full-disc vector fill every frame. `LON_STEPS`/`LAT_STEPS` trade
+geometric detail against cost; `SHADE.scale` in `renderer.ts` trades shading
+resolution.
 
 The vector overlays still ride the sphere rather than being depth-tested
 against the terrain. Coastlines sit at sea level so they stay correct by

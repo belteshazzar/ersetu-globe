@@ -106,28 +106,15 @@ export function renderGlobe(
     scene.terrain ?? null,
     state.exaggeration,
   )
-  if (surface) blit(ctx, surface, surface.sea)
+  if (surface) blit(ctx, surface, surface.pixels)
 
-  // Land goes on with the real coastline geometry rather than a mask, which
-  // keeps its edge exactly on the stroked outline below and lets the canvas
-  // antialias it.
+  // Displaced terrain already knows which of its samples are land, from the
+  // same elevation that gave them their shape, so it arrives coloured.
   //
-  // With relief to draw, the land shading becomes the fill: the polygons are
-  // filled with the second shaded buffer as a pattern, aligned to the globe.
-  // Painting the land image over the whole disc and then cutting it to shape
-  // would mean scaling a second full-disc buffer up every frame, and that blit
-  // - not the shading - was the most expensive thing in the loop. This way the
-  // rasteriser only touches the third of the disc that is actually land.
-  //
-  // Without relief there is nothing to fill with, so the land is cut out and
-  // left as a hole, which is what the globe did before there was any.
-  if (surface?.land) {
-    const pattern = landPattern(ctx, surface)
-    if (pattern) {
-      ctx.fillStyle = pattern
-      fillPolygons(ctx, landfill, camera)
-    }
-  } else {
+  // The bare sphere does not - there is no elevation to ask - so its land is
+  // cut out with the real coastline geometry rather than a bitmask, which
+  // keeps the edge on the stroked outline and lets the canvas antialias it.
+  if (!surface?.terrain) {
     ctx.globalCompositeOperation = 'destination-out'
     ctx.fillStyle = '#000'
     fillPolygons(ctx, landfill, camera)
@@ -148,7 +135,7 @@ export function renderGlobe(
   // silhouette of its own - that is rather the point of displacing it - and a
   // perfect circle drawn over the top would saw straight through every
   // mountain standing past it.
-  if (!surface?.land) {
+  if (!surface?.terrain) {
     ctx.beginPath()
     ctx.arc(cx, cy, radius, 0, Math.PI * 2)
     ctx.strokeStyle = LIMB
@@ -184,55 +171,6 @@ export function renderGlobe(
 // through drawImage, which honours both.
 let scratch: HTMLCanvasElement | null = null
 let scratchCtx: CanvasRenderingContext2D | null = null
-
-// A second one, holding the land shading so it can be used as a fill.
-let landScratch: HTMLCanvasElement | null = null
-let landScratchCtx: CanvasRenderingContext2D | null = null
-
-/**
- * The land shading as a pattern, positioned and scaled so that it lands on the
- * globe exactly where the sea buffer does.
- */
-function landPattern(
-  ctx: CanvasRenderingContext2D,
-  image: SurfaceImage,
-): CanvasPattern | null {
-  if (!image.land) return null
-
-  if (!landScratch) {
-    if (typeof document === 'undefined') return null
-    landScratch = document.createElement('canvas')
-    landScratchCtx = landScratch.getContext('2d')
-  }
-  if (!landScratch || !landScratchCtx) return null
-
-  if (landScratch.width !== image.width || landScratch.height !== image.height) {
-    landScratch.width = image.width
-    landScratch.height = image.height
-  }
-
-  landScratchCtx.putImageData(
-    new ImageData(
-      image.land.subarray(0, image.width * image.height * 4),
-      image.width,
-      image.height,
-    ),
-    0,
-    0,
-  )
-
-  const pattern = ctx.createPattern(landScratch, 'no-repeat')
-  if (!pattern) return null
-
-  // The buffer covers the globe's bounding box at a fraction of its size, so
-  // the pattern has to be scaled back up and moved into place.
-  pattern.setTransform(
-    new DOMMatrix()
-      .translateSelf(image.x, image.y)
-      .scaleSelf(image.w / image.width, image.h / image.height),
-  )
-  return pattern
-}
 
 function blit(
   ctx: CanvasRenderingContext2D,
