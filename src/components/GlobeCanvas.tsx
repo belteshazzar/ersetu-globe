@@ -6,6 +6,7 @@ import { DEMO_SHAPES } from '../globe/demoShapes'
 import { DEMO_ORBITS, DEMO_TIME_SCALE } from '../globe/demoOrbits'
 import { DEMO_LABELS } from '../globe/demoLabels'
 import { loadElevation, type ElevationGrid } from '../globe/elevation'
+import { buildTerrain, type TerrainMesh } from '../globe/terrain'
 import elevationUrl from '../globe/data/elevation.bin?url'
 import './GlobeCanvas.css'
 
@@ -28,14 +29,19 @@ export function GlobeCanvas() {
   // state: the render loop reads it directly, and swapping it in should not
   // re-render anything.
   const elevationRef = useRef<ElevationGrid | null>(null)
+  const terrainRef = useRef<TerrainMesh | null>(null)
 
-  // A few hundred kB that the first frames do not wait for. Until it lands the
-  // globe shades as smooth metal, which is what it looked like before.
+  // A couple of megabytes that the first frames do not wait for. Until it
+  // lands the globe is a smooth sphere, which is what it looked like before.
   useEffect(() => {
     let cancelled = false
     loadElevation(elevationUrl)
       .then((grid) => {
-        if (!cancelled) elevationRef.current = grid
+        if (cancelled) return
+        // Displacing the mesh is a one-off: the shape is fixed in the globe's
+        // own frame, and only the camera moves after this.
+        terrainRef.current = buildTerrain(grid)
+        elevationRef.current = grid
       })
       .catch((error: unknown) => {
         console.warn('Elevation data unavailable; shading the globe flat.', error)
@@ -97,6 +103,7 @@ export function GlobeCanvas() {
           orbits: DEMO_ORBITS,
           labels: DEMO_LABELS,
           elevation: elevationRef.current,
+          terrain: terrainRef.current,
           time: next.elapsed * DEMO_TIME_SCALE,
         })
 

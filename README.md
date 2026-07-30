@@ -1,7 +1,8 @@
 # ersetu-globe
 
 A lightweight 3D globe with no runtime dependencies beyond React, rendered
-entirely with the 2D canvas API — including shaded topography and bathymetry.
+entirely with the 2D canvas API — including exaggerated topography and
+bathymetry as real displaced geometry, with its own software z-buffer.
 No WebGL, no mapping library, no tile server.
 
 **[Live demo](https://belteshazzar.github.io/ersetu-globe/)**
@@ -27,16 +28,19 @@ npm run dev
 
 Everything is drawn into one canvas, in layers:
 
-1. **The metal sea** is shaded per pixel — an environment reflection looked
+1. **The displaced globe is rasterised** by a small software z-buffer into a
+   G-buffer of grid coordinates and depth — real geometry, so real silhouette,
+   parallax and occlusion.
+2. **The sea is shaded** from that per pixel — an environment reflection looked
    up by the reflected ray's height, plus a Fresnel rim, darkened with depth
-   and modulated by the relief of the sea floor. It runs at a fraction of
-   display resolution and is scaled up on blit; it is all smooth gradient, so
-   nothing is lost.
-2. **Land is filled** with a second shaded buffer, using the real coastline
+   and lit by the sea floor's own slope. It runs at a fraction of display
+   resolution and is scaled up on blit; it is all smooth gradient, so nothing
+   is lost.
+3. **Land is filled** with a second shaded buffer, using the real coastline
    geometry as the fill rather than a bitmask, which keeps the edge aligned
    with the stroked outline and lets the canvas antialias it.
-3. **Coastlines and the graticule** are stroked as vectors at full resolution.
-4. **Overlays** — surface geometry, then orbits, then labels.
+4. **Coastlines and the graticule** are stroked as vectors at full resolution.
+5. **Overlays** — surface geometry, then orbits, then labels.
 
 Geometry is baked onto the unit sphere once at load, so no per-frame
 trigonometry touches the point data; a frame only builds a camera rotation and
@@ -49,21 +53,40 @@ multiplies through it.
 
 ### Relief
 
-`src/globe/elevation.ts` and the relief half of `src/globe/surface.ts`.
+`src/globe/terrain.ts`, `src/globe/elevation.ts`, and the terrain half of
+`src/globe/surface.ts`.
 
-Earth is smoother than it looks: Everest is 0.14% of the radius, so at the
-default 288px globe the whole range from the summit to the Challenger Deep is
-under one pixel. Nothing would be visible without exaggeration — but relief
-*shading* works on gradients rather than heights, so it needs a slope gain of
-about 7 rather than the 20×–100× that displacing the geometry would.
+The globe is not a sphere. Every vertex of a lon/lat mesh is pushed out to
+`1 + k·h`, so mountains genuinely stand off the surface, basins genuinely sink
+into it, and the silhouette is not a circle — measured, the outline runs from
+0.972 to 1.026 of the nominal radius, about ±7 px at the default size.
 
-The elevation is never displaced. It modulates the lighting instead: the
-environment reflection describes the shape of the sphere, which is smooth, and
-terrain is a local brightening and darkening on top of it. That is both truer
-to what the eye reads as relief and far cheaper, because the whole terrain
-contribution is one scalar per pixel and it falls out with no vector rotation
-at all. For slopes `se`, `sn` in the local east/north frame the perturbed
-normal is `w - (se*e + sn*n)`, so
+Earth is smoother than it looks, which is why that needs exaggerating at all:
+Everest is 0.14% of the radius, so unexaggerated the whole range from the
+summit to the Challenger Deep would be under one pixel. `EXAGGERATION` is 30.
+
+The 2D canvas has no notion of depth, so a mountain can only hide what is
+behind it if we sort that out ourselves: `terrain.ts` is a small software
+rasteriser with a z-buffer. Two things make it much cheaper than it sounds.
+
+An orthographic projection is affine — no perspective divide — so attributes
+interpolate exactly with plain screen-space barycentrics and no correction is
+needed anywhere. And a radial height field has no overhangs, so the surface is
+closed and star-shaped about its centre, which means any back-facing triangle
+is hidden by front-facing geometry and winding order alone discards half the
+mesh before rasterising.
+
+The rasteriser does not shade. It writes only where on the elevation grid each
+covered sample landed, plus its depth — a G-buffer — and the shading pass then
+reads the *full resolution* grid per pixel. So geometry is limited by the mesh
+at about a degree, but the shading is not: the relief keeps all the detail it
+would have had as a pure lighting trick, while the silhouette, the parallax and
+the occlusion become real.
+
+Terrain still perturbs the lighting on top of the displaced surface, which is a
+separate and much smaller gain — shading works on gradients, so
+`SHADE_EXAGGERATION` is 7 where the geometry needs 30. For slopes `se`, `sn` in
+the local east/north frame the perturbed normal is `w - (se*e + sn*n)`, so
 
 ```
 n'.L = (w.L - se(e.L) - sn(n.L)) / sqrt(1 + se^2 + sn^2)
@@ -71,17 +94,24 @@ n'.L = (w.L - se(e.L) - sn(n.L)) / sqrt(1 + se^2 + sn^2)
 
 The key light is fixed in camera space, so `L` is carried into world space once
 per frame rather than per pixel, and `e` and `n` come straight from the world
-normal with no trigonometry. `w.L` is what the smooth sphere would have given,
-so subtracting it leaves exactly the terrain's own contribution.
+normal with no trigonometry. `w.L` is what the unperturbed surface would have
+given, so subtracting it leaves exactly the terrain's own contribution.
 
-Land and sea are shaded in the same pass, sharing the unprojection, the grid
-lookup and the slope. Sea gets the metal, darkened with depth; land gets a
-height ramp — four stops in `LAND_STOPS`, cool and dark rather than an atlas
-green-and-brown, since the relief should read from the shading. Change those
-stops for a physical-atlas palette.
+Land and sea are shaded in the same pass. Sea gets the metal, darkened with
+depth; land gets a height ramp — four stops in `LAND_STOPS`, cool and dark
+rather than an atlas green-and-brown, since the relief should read from the
+shading. Change those stops for a physical-atlas palette.
 
-Relief costs about 1.5× a flat frame. If that matters, `SHADE.scale` in
-`renderer.ts` trades relief resolution against it directly.
+The whole displaced globe costs about twice a smooth-sphere frame, and rather
+less than the same relief did as a lighting trick: reading grid coordinates the
+rasteriser already interpolated is cheaper than recovering them per pixel, and
+only covered samples are shaded. `LON_STEPS`/`LAT_STEPS` trade geometric detail
+against cost; `SHADE.scale` in `renderer.ts` trades shading resolution.
+
+The vector overlays still ride the sphere rather than being depth-tested
+against the terrain. Coastlines sit at sea level so they stay correct by
+construction; the visible cost is that a route or label behind a tall peak is
+not hidden by it.
 
 ### Surface geometry
 

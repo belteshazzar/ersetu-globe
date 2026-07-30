@@ -11,6 +11,7 @@ import {
 } from './projection'
 import { shadeSurface, type SurfaceImage } from './surface'
 import type { ElevationGrid } from './elevation'
+import type { TerrainMesh } from './terrain'
 import type { Shape } from './shapes'
 import { drawOrbits, type Orbit } from './orbits'
 import { drawLabels, type Label } from './labels'
@@ -30,8 +31,11 @@ export type Scene = {
    * Relief for the globe itself, rather than an overlay on it. Optional and
    * loaded asynchronously: until it arrives the globe shades as smooth metal
    * with the land cut out, which is what it did before there was any.
+   * `terrain` is the displaced mesh built from `elevation`; both are needed
+   * before the globe takes on any shape.
    */
   elevation?: ElevationGrid | null
+  terrain?: TerrainMesh | null
   /**
    * The clock driving satellite motion, in the same units as each orbit's
    * period. Scale it however fast you want the animation to run.
@@ -94,7 +98,13 @@ export function renderGlobe(
   const camera = globeCamera(viewport, state)
   const { cx, cy, radius } = camera
 
-  const surface = shadeSurface(camera, viewport, SHADE, scene.elevation ?? null)
+  const surface = shadeSurface(
+    camera,
+    viewport,
+    SHADE,
+    scene.elevation ?? null,
+    scene.terrain ?? null,
+  )
   if (surface) blit(ctx, surface, surface.sea)
 
   // Land goes on with the real coastline geometry rather than a mask, which
@@ -133,11 +143,16 @@ export function renderGlobe(
   ctx.strokeStyle = COAST
   strokeMesh(ctx, coastlines, camera)
 
-  // Sphere silhouette, over the shaded limb.
-  ctx.beginPath()
-  ctx.arc(cx, cy, radius, 0, Math.PI * 2)
-  ctx.strokeStyle = LIMB
-  ctx.stroke()
+  // Sphere silhouette, over the shaded limb. Displaced terrain has a
+  // silhouette of its own - that is rather the point of displacing it - and a
+  // perfect circle drawn over the top would saw straight through every
+  // mountain standing past it.
+  if (!surface?.land) {
+    ctx.beginPath()
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2)
+    ctx.strokeStyle = LIMB
+    ctx.stroke()
+  }
 
   // Surface overlays go through the same horizon clipping as the coastlines,
   // so they are hidden exactly where the surface curves away.

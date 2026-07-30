@@ -1,80 +1,52 @@
 /**
- * Per-pixel shading for the sphere: the metal sea, and the land relief.
+ * Per-pixel shading for the globe: the metal sea, and the land relief.
  *
  * Metal reads as metal because of what it reflects, not because of its
  * diffuse colour, so the base tone here comes from an environment gradient
  * looked up by the reflection vector, with a Fresnel rim on top.
  *
- * Relief is added as a *modulation* of that lighting rather than by disturbing
- * the reflection. The environment gradient describes the shape of the sphere,
- * which is smooth; terrain is a local brightening and darkening on top of it.
- * Keeping the two separate is both truer to what the eye reads as relief and
- * far cheaper - the reflection lookup is untouched, and the whole terrain
- * contribution is one scalar per pixel.
+ * There are two ways through this file. Without an elevation grid the globe is
+ * a smooth sphere and every sample is found analytically from the disc, which
+ * is what it did before there was any relief. With one, the geometry has
+ * already been rasterised by `terrain.ts` and this reads the G-buffer it left:
+ * which point of the elevation grid each sample landed on, and how far away it
+ * was. Nothing here has to work out where on the globe a pixel is - the
+ * rasteriser interpolated that - so the shading pass costs less than it did
+ * when the relief was only a lighting trick, and now it is real geometry.
  *
- * That scalar falls out with no vector rotation at all. The perturbed normal is
- * `w - (se*e + sn*n)` for slopes `se`, `sn` in the local east/north frame, so
+ * Terrain still perturbs the lighting on top of the displaced surface. The
+ * mesh carries features down to about a degree; the grid holds five times
+ * that, and the difference would be lost if the mesh's own normals were used.
+ * So the slope is taken from the full resolution grid per pixel, and shading
+ * detail stays far finer than the geometry underneath it:
  *
  *     n'.L = (w.L - se(e.L) - sn(n.L)) / sqrt(1 + se^2 + sn^2)
  *
- * and because the key light is fixed in camera space, `L` need only be carried
- * into world space once per frame. `w.L` is the value the smooth sphere would
- * have had, so subtracting it leaves exactly the terrain's own contribution.
+ * for slopes `se`, `sn` in the local east/north frame. The key light is fixed
+ * in camera space, so `L` is carried into world space once per frame rather
+ * than per pixel, and `e` and `n` come straight from the world normal with no
+ * trigonometry. `w.L` is what the unperturbed surface would have given, so
+ * subtracting it leaves exactly the terrain's own contribution.
  *
- * Two images come out of the one pass: the sea look and the land look. They
- * share every expensive term - the unprojection, the grid lookup, the slope -
- * and the renderer composites the land one into the holes it punches with the
- * real coastline geometry, so the shoreline stays exactly where the vector
- * outline puts it rather than wherever a 19 km grid cell happens to fall.
- *
- * All of this is smooth enough to run at a fraction of display resolution and
- * be scaled up on blit; every crisp edge in the final image comes from the
- * vector passes drawn over it.
+ * Two images come out of one pass: the sea look and the land look. They share
+ * every expensive term, and the renderer fills the coastline geometry with the
+ * land one, so the shoreline stays exactly where the vector outline puts it.
  */
 import type { Camera } from './projection'
 import { sampleReliefAt, type ElevationGrid, type Relief } from './elevation'
-
-const HALF_PI = Math.PI / 2
-const TAU = Math.PI * 2
-
-/**
- * atan2 to within about 1e-7 radians - a thousandth of a grid cell, and far
- * finer than anything that reaches a pixel.
- *
- * The library version is accurate to the last bit and costs accordingly, which
- * is worth paying once but not once per sample: this is the hot path, run for
- * every shaded pixel of the globe, twice. Folding the argument into [0, 1] and
- * running a seven term odd polynomial is several times quicker.
- */
-function fastAtan2(y: number, x: number): number {
-  const ax = x < 0 ? -x : x
-  const ay = y < 0 ? -y : y
-  if (ax === 0 && ay === 0) return 0
-
-  // Keep the ratio inside the unit interval, where the polynomial is fitted.
-  const swap = ay > ax
-  const t = swap ? ax / ay : ay / ax
-  const t2 = t * t
-
-  let r =
-    t *
-    (0.99999766 +
-      t2 *
-        (-0.33262347 +
-          t2 *
-            (0.19354346 +
-              t2 * (-0.11643287 + t2 * (0.05265332 + t2 * -0.0117212)))))
-
-  if (swap) r = HALF_PI - r
-  if (x < 0) r = Math.PI - r
-  return y < 0 ? -r : r
-}
+import {
+  getGBuffer,
+  placeBuffer,
+  rasteriseTerrain,
+  NOT_COVERED,
+  type TerrainMesh,
+} from './terrain'
 
 export type SurfaceImage = {
   // Explicitly backed by an ArrayBuffer (not SharedArrayBuffer) so the
   // buffer can be handed straight to the ImageData constructor.
   sea: Uint8ClampedArray<ArrayBuffer>
-  /** Null when there is no elevation grid, in which case land stays a hole. */
+  /** Null when there is no elevation, in which case land stays a hole. */
   land: Uint8ClampedArray<ArrayBuffer> | null
   /** Buffer dimensions, in shading samples. */
   width: number
@@ -107,8 +79,7 @@ const RIM_TINT = [40, 118, 230]
 /**
  * Land tones, by height. Deliberately cool and dark rather than the greens and
  * browns of a physical atlas: this globe is a dark instrument, and the relief
- * should read from the shading rather than from biome colour. Change these
- * stops and their heights to get an atlas palette instead.
+ * should read from the shading. Change these stops for an atlas palette.
  */
 const LAND_STOPS = [
   { height: 0, color: [22, 38, 58] },
@@ -147,13 +118,11 @@ for (let i = 0; i < RAMP_SIZE; i++) {
 const EARTH_RADIUS_M = 6_371_000
 
 /**
- * Slope gain. Relief shading works on gradients rather than heights, so it
- * needs nothing like the 20x-100x that displacing the geometry would: over a
- * 19 km grid cell a 2 km rise is already a slope of 0.1. This is enough to
- * make the ocean ridges and the great mountain chains obvious without turning
- * gentle country into noise.
+ * Slope gain for the *lighting*, which is a separate thing from the gain used
+ * to displace the geometry. Shading works on gradients, so it needs far less:
+ * over a 19 km grid cell a 2 km rise is already a slope of 0.1.
  */
-const EXAGGERATION = 7
+const SHADE_EXAGGERATION = 7
 
 /** How strongly relief modulates each surface. Land carries more than sea. */
 const SEA_RELIEF = 0.42
@@ -185,7 +154,7 @@ export type ShadeOptions = {
 }
 
 /**
- * Shade the visible sphere into reusable RGBA buffers.
+ * Shade the visible globe into reusable RGBA buffers.
  * Returns null when the globe is entirely off screen.
  */
 export function shadeSurface(
@@ -193,14 +162,17 @@ export function shadeSurface(
   viewport: { width: number; height: number },
   options: ShadeOptions,
   grid: ElevationGrid | null,
+  mesh: TerrainMesh | null,
 ): SurfaceImage | null {
-  const { cx, cy, radius, cosLon, sinLon, cosLat, sinLat } = camera
+  const { cx, cy, radius } = camera
 
-  // Only shade where the globe and the viewport actually overlap.
-  const x0 = Math.max(0, Math.floor(cx - radius))
-  const y0 = Math.max(0, Math.floor(cy - radius))
-  const x1 = Math.min(viewport.width, Math.ceil(cx + radius))
-  const y1 = Math.min(viewport.height, Math.ceil(cy + radius))
+  // Only shade where the globe and the viewport actually overlap. Displaced
+  // terrain stands proud of the sphere, so the box has to allow for it.
+  const reach = radius * (grid && mesh ? 1.12 : 1)
+  const x0 = Math.max(0, Math.floor(cx - reach))
+  const y0 = Math.max(0, Math.floor(cy - reach))
+  const x1 = Math.min(viewport.width, Math.ceil(cx + reach))
+  const y1 = Math.min(viewport.height, Math.ceil(cy + reach))
   if (x1 <= x0 || y1 <= y0) return null
 
   const cssW = x1 - x0
@@ -223,7 +195,7 @@ export function shadeSurface(
   sea.fill(0, 0, needed)
 
   let land: Uint8ClampedArray<ArrayBuffer> | null = null
-  if (grid) {
+  if (grid && mesh) {
     if (!landBuffer || landBuffer.length < needed) {
       landBuffer = new Uint8ClampedArray(needed)
     }
@@ -231,40 +203,53 @@ export function shadeSurface(
     land.fill(0, 0, needed)
   }
 
-  // Feather the limb over roughly a pixel so the disc edge is not stair-stepped.
-  const feather = Math.min(0.5, 1.5 / (radius * scale))
-  const featherStart = (1 - feather) * (1 - feather)
-
   const stepX = cssW / width
   const stepY = cssH / height
+  const image = { sea, land, width, height, x: x0, y: y0, w: cssW, h: cssH }
 
-  // The key light, carried into world space once. Terrain slopes live in the
-  // local east/north frame, which is a world-space thing; taking the light to
-  // them costs one rotation per frame instead of one per pixel.
+  if (grid && mesh && land) {
+    shadeTerrain(camera, grid, mesh, image, stepX, stepY)
+  } else {
+    shadeSphere(camera, image, stepX, stepY, scale)
+  }
+
+  return image
+}
+
+/** The key light, carried into world space. Terrain slopes live there. */
+function worldLight(camera: Camera) {
+  const { cosLon, sinLon, cosLat, sinLat } = camera
   const lz1 = LZ * cosLat - LY * sinLat
-  const lightY = LY * cosLat + LZ * sinLat
-  const lightX = LX * cosLon + lz1 * sinLon
-  const lightZ = lz1 * cosLon - LX * sinLon
+  return {
+    x: LX * cosLon + lz1 * sinLon,
+    y: LY * cosLat + LZ * sinLat,
+    z: lz1 * cosLon - LX * sinLon,
+  }
+}
 
-  // A grid cell's north-south extent never varies; its east-west extent is a
-  // full circumference divided between the columns, narrowing with latitude.
-  // Held as reciprocals: the pixel loop should multiply, not divide.
-  const invCellNorth = grid ? grid.height / (Math.PI * EARTH_RADIUS_M) : 0
-  const invCellEast = grid ? grid.width / (2 * Math.PI * EARTH_RADIUS_M) : 0
+/**
+ * The smooth sphere, with no elevation to draw. Every sample is found from the
+ * disc itself, and the limb is feathered over about a pixel so the edge is not
+ * stair-stepped.
+ */
+function shadeSphere(
+  camera: Camera,
+  image: SurfaceImage,
+  stepX: number,
+  stepY: number,
+  scale: number,
+) {
+  const { cx, cy, radius } = camera
+  const { sea, width, height, x: x0, y: y0 } = image
 
-  // Angle straight to grid coordinate, so the loop never forms degrees.
-  const gridPerRadianX = grid ? grid.width / TAU : 0
-  const gridPerRadianY = grid ? grid.height / Math.PI : 0
-  const halfWidth = grid ? grid.width / 2 : 0
-  const halfHeight = grid ? grid.height / 2 : 0
+  const feather = Math.min(0.5, 1.5 / (radius * scale))
+  const featherStart = (1 - feather) * (1 - feather)
 
   for (let by = 0; by < height; by++) {
     const ny = (cy - (y0 + (by + 0.5) * stepY)) / radius
     const ny2 = ny * ny
     if (ny2 >= 1) continue
     let index = by * width * 4
-
-    // Row constants, hoisted out of the pixel loop.
     const nyLY = ny * LY
 
     for (let bx = 0; bx < width; bx++, index += 4) {
@@ -273,95 +258,116 @@ export function shadeSurface(
       if (r2 >= 1) continue
 
       const nz = Math.sqrt(1 - r2)
+      const base = 0.82 + 0.18 * Math.max(0, nx * LX + nyLY + nz * LZ)
+      const fresnel = fresnelAt(nz)
 
-      // Environment reflection, sampled by the reflected ray's height. Each
-      // half of the ramp is eased so the two meet with matching slope at the
-      // horizon - a plain linear join leaves a visible crease there.
-      const t = nz * ny + 0.5 // == (2*nz*ny)*0.5 + 0.5
-      let er: number
-      let eg: number
-      let eb: number
-      if (t > 0.5) {
-        const u = (t - 0.5) * 2
-        const k = u * u * (3 - 2 * u)
-        er = HORIZON[0] + (SKY[0] - HORIZON[0]) * k
-        eg = HORIZON[1] + (SKY[1] - HORIZON[1]) * k
-        eb = HORIZON[2] + (SKY[2] - HORIZON[2]) * k
-      } else {
-        const u = t * 2
-        const k = u * u * (3 - 2 * u)
-        er = GROUND[0] + (HORIZON[0] - GROUND[0]) * k
-        eg = GROUND[1] + (HORIZON[1] - GROUND[1]) * k
-        eb = GROUND[2] + (HORIZON[2] - GROUND[2]) * k
-      }
-
-      // Fresnel: grazing angles reflect more, which brightens the limb.
-      const f = 1 - nz
-      const f2 = f * f
-      const fresnel = f2 * f2 * 0.55
-
-      // What the smooth sphere alone would give.
-      const flat = nx * LX + nyLY + nz * LZ
-      const base = 0.82 + 0.18 * Math.max(0, flat)
-
-      const alpha =
+      environment(nz * ny + 0.5)
+      sea[index] = env[0] * base + fresnel * RIM_TINT[0]
+      sea[index + 1] = env[1] * base + fresnel * RIM_TINT[1]
+      sea[index + 2] = env[2] * base + fresnel * RIM_TINT[2]
+      sea[index + 3] =
         r2 > featherStart ? 255 * Math.min(1, (1 - Math.sqrt(r2)) / feather) : 255
+    }
+  }
+}
 
-      if (!grid || !land) {
-        sea[index] = er * base + fresnel * RIM_TINT[0]
-        sea[index + 1] = eg * base + fresnel * RIM_TINT[1]
-        sea[index + 2] = eb * base + fresnel * RIM_TINT[2]
-        sea[index + 3] = alpha
-        continue
-      }
+/**
+ * The displaced globe. The rasteriser has already decided what is visible and
+ * where on the elevation grid it sits, so this walks the G-buffer and lights
+ * what it finds.
+ */
+function shadeTerrain(
+  camera: Camera,
+  grid: ElevationGrid,
+  mesh: TerrainMesh,
+  image: SurfaceImage,
+  stepX: number,
+  stepY: number,
+) {
+  const { cx, cy, radius, cosLon, sinLon, cosLat, sinLat } = camera
+  const { sea, land, width, height, x: x0, y: y0 } = image
+  if (!land) return
 
-      // Undo the camera rotation to find where on the globe this pixel is.
-      const wy = ny * cosLat + nz * sinLat
-      const z1 = nz * cosLat - ny * sinLat
-      const wx = nx * cosLon + z1 * sinLon
-      const wz = z1 * cosLon - nx * sinLon
+  const place = placeBuffer(camera, x0, y0, stepX, stepY)
+  const gbuffer = getGBuffer(width, height)
+  rasteriseTerrain(mesh, camera, place, gbuffer)
 
-      // The world normal's horizontal length is the cosine of the latitude,
-      // which makes the latitude itself an atan2 rather than an arcsine - and
-      // the same routine then serves for the longitude.
+  const light = worldLight(camera)
+  const invCellNorth = grid.height / (Math.PI * EARTH_RADIUS_M)
+  const invCellEast = grid.width / (2 * Math.PI * EARTH_RADIUS_M)
+  const { u: uBuf, v: vBuf, depth } = gbuffer
+
+  for (let by = 0; by < height; by++) {
+    const ny = (cy - (y0 + (by + 0.5) * stepY)) / radius
+    const rowBase = by * width
+    let index = rowBase * 4
+
+    for (let bx = 0; bx < width; bx++, index += 4) {
+      const sample = rowBase + bx
+      const z = depth[sample]
+      if (z === NOT_COVERED) continue
+
+      const nx = (x0 + (bx + 0.5) * stepX - cx) / radius
+
+      // The surface direction, from the point the ray actually hit rather than
+      // from the disc: on displaced ground these differ, which is the whole
+      // point.
+      const invLength = 1 / Math.sqrt(nx * nx + ny * ny + z * z)
+      const dx = nx * invLength
+      const dy = ny * invLength
+      const dz = z * invLength
+
+      const flat = dx * LX + dy * LY + dz * LZ
+      const base = 0.82 + 0.18 * (flat > 0 ? flat : 0)
+      const fresnel = fresnelAt(dz)
+      environment(dz * dy + 0.5)
+
+      // Undo the camera rotation for the local east/north frame.
+      const wy = dy * cosLat + dz * sinLat
+      const z1 = dz * cosLat - dy * sinLat
+      const wx = dx * cosLon + z1 * sinLon
+      const wz = z1 * cosLon - dx * sinLon
+
       const horizontal = Math.sqrt(wx * wx + wz * wz)
       const cosPhi = horizontal > MIN_COS_LAT ? horizontal : MIN_COS_LAT
       const invCos = 1 / cosPhi
 
-      sampleReliefAt(
-        grid,
-        (fastAtan2(wx, wz) * gridPerRadianX + halfWidth) - 0.5,
-        (halfHeight - fastAtan2(wy, horizontal) * gridPerRadianY) - 0.5,
-        relief,
-      )
+      sampleReliefAt(grid, uBuf[sample], vBuf[sample], relief)
 
-      // Slopes, as a rise over a run in the same units.
-      const se = EXAGGERATION * relief.east * invCellEast * invCos
-      const sn = EXAGGERATION * relief.north * invCellNorth
+      const se = SHADE_EXAGGERATION * relief.east * invCellEast * invCos
+      const sn = SHADE_EXAGGERATION * relief.north * invCellNorth
 
-      // The light resolved onto the local east and north directions. Both
-      // basis vectors come straight from the world normal, no trigonometry:
       // east is (wz, 0, -wx)/cos, north is (-wy*wx, cos^2, -wy*wz)/cos.
-      const eastDotL = (wz * lightX - wx * lightZ) * invCos
+      const eastDotL = (wz * light.x - wx * light.z) * invCos
       const northDotL =
-        (-wy * wx * lightX + cosPhi * cosPhi * lightY - wy * wz * lightZ) * invCos
+        (-wy * wx * light.x + cosPhi * cosPhi * light.y - wy * wz * light.z) *
+        invCos
 
       const tilted =
         (flat - se * eastDotL - sn * northDotL) / Math.sqrt(1 + se * se + sn * sn)
-
-      // Terrain's own contribution: what the slope added over flat ground.
       const shade = tilted - flat
       const elevation = relief.height
 
-      // Sea: the metal, darkened with depth and modulated by the sea floor.
-      const depth = elevation < 0 ? Math.min(1, -elevation / FULL_DEPTH) : 0
-      const seaGain = base * (1 - DEPTH_DARKEN * depth) + SEA_RELIEF * shade
-      sea[index] = er * seaGain + fresnel * RIM_TINT[0]
-      sea[index + 1] = eg * seaGain + fresnel * RIM_TINT[1]
-      sea[index + 2] = eb * seaGain + fresnel * RIM_TINT[2]
+      const deep = elevation < 0 ? Math.min(1, -elevation / FULL_DEPTH) : 0
+      const seaGain = base * (1 - DEPTH_DARKEN * deep) + SEA_RELIEF * shade
+      // The rasteriser decides coverage per whole sample, so the silhouette
+      // comes out as a staircase. Counting how many of the four neighbours were
+      // also covered approximates how much of this sample the surface actually
+      // fills, which softens the edge to something the upscale can carry - a
+      // sample walled in on all sides stays solid, one clinging to the rim
+      // fades. Only the outline is affected; interior samples all score four.
+      let covered = 4
+      if (bx === 0 || depth[sample - 1] === NOT_COVERED) covered--
+      if (bx === width - 1 || depth[sample + 1] === NOT_COVERED) covered--
+      if (by === 0 || depth[sample - width] === NOT_COVERED) covered--
+      if (by === height - 1 || depth[sample + width] === NOT_COVERED) covered--
+      const alpha = covered === 4 ? 255 : 64 + covered * 48
+
+      sea[index] = env[0] * seaGain + fresnel * RIM_TINT[0]
+      sea[index + 1] = env[1] * seaGain + fresnel * RIM_TINT[1]
+      sea[index + 2] = env[2] * seaGain + fresnel * RIM_TINT[2]
       sea[index + 3] = alpha
 
-      // Land: a height ramp, lit by the same slope.
       let ramp = elevation > 0 ? (elevation * RAMP_SCALE) | 0 : 0
       if (ramp >= RAMP_SIZE) ramp = RAMP_SIZE - 1
       ramp *= 3
@@ -370,12 +376,39 @@ export function shadeSurface(
       land[index] = landRamp[ramp] * landGain
       land[index + 1] = landRamp[ramp + 1] * landGain
       land[index + 2] = landRamp[ramp + 2] * landGain
-      // Feathered exactly like the sea, so a continent meeting the silhouette
-      // fades into the page on the same edge the sea does rather than stopping
-      // against it.
       land[index + 3] = alpha
     }
   }
+}
 
-  return { sea, land, width, height, x: x0, y: y0, w: cssW, h: cssH }
+// Scratch for the environment lookup, so it can return three numbers without
+// allocating on every sample.
+const env = [0, 0, 0]
+
+/**
+ * Environment reflection, sampled by the reflected ray's height. Each half of
+ * the ramp is eased so the two meet with matching slope at the horizon - a
+ * plain linear join leaves a visible crease there.
+ */
+function environment(t: number) {
+  if (t > 0.5) {
+    const u = (t - 0.5) * 2
+    const k = u * u * (3 - 2 * u)
+    env[0] = HORIZON[0] + (SKY[0] - HORIZON[0]) * k
+    env[1] = HORIZON[1] + (SKY[1] - HORIZON[1]) * k
+    env[2] = HORIZON[2] + (SKY[2] - HORIZON[2]) * k
+  } else {
+    const u = t > 0 ? t * 2 : 0
+    const k = u * u * (3 - 2 * u)
+    env[0] = GROUND[0] + (HORIZON[0] - GROUND[0]) * k
+    env[1] = GROUND[1] + (HORIZON[1] - GROUND[1]) * k
+    env[2] = GROUND[2] + (HORIZON[2] - GROUND[2]) * k
+  }
+}
+
+/** Grazing angles reflect more, which brightens the limb. */
+function fresnelAt(nz: number) {
+  const f = 1 - nz
+  const f2 = f * f
+  return f2 * f2 * 0.55
 }
