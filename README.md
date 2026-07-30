@@ -33,7 +33,7 @@ Everything is drawn into one canvas, in layers:
    rather than a bitmask, which keeps the edge aligned with the stroked outline
    and lets the canvas antialias it.
 3. **Coastlines and the graticule** are stroked as vectors at full resolution.
-4. **Overlays** — surface geometry, then orbits.
+4. **Overlays** — surface geometry, then orbits, then labels.
 
 Geometry is baked onto the unit sphere once at load, so no per-frame
 trigonometry touches the point data; a frame only builds a camera rotation and
@@ -97,12 +97,57 @@ continents. Real satellites orbit in an inertial frame while the Earth turns
 underneath, which makes ground tracks drift west each revolution; reproducing
 that would need a spinning Earth, which this globe does not model.
 
+### Labels
+
+`src/globe/labels.ts`. Text pinned to the globe — to a place on the surface, to
+a point standing above it, or to something moving.
+
+```ts
+import { label, labelAbove, labelOn, labelTracking, onSurface } from './globe/labels'
+
+// Pinned to the surface.
+const london = label('London', [-0.13, 51.51])
+
+// Pinned above the surface, tethered to the ground point below it.
+const relay = labelAbove('Polar relay', [12, 78], 1500, { leader: true })
+
+// Riding a satellite, from a baked orbit or from bare elements.
+const tag = labelOn('ISS-like', iss, { color: 'rgba(200, 240, 255, 1)' })
+
+// Anything else that moves: the anchor is asked for a position each frame.
+const flight = labelTracking(
+  (t) => `BA117  FL${Math.round(altitude(t) / 100)}`,
+  onSurface((t) => ({ ...positionAt(t), altitudeKm: 11 })),
+)
+```
+
+A label is text plus an *anchor* — a function returning where it is attached,
+in globe radii, at a given time. All four constructors differ only in that
+function, so a label following a satellite costs no more per frame than one
+nailed to a coastline. `text` may itself be a function of the clock, for a live
+readout.
+
+Labels are hidden by the same occlusion test the orbits use, not the hemisphere
+test surface geometry uses, so one riding a high satellite stays readable while
+it passes wide of the silhouette. Anything that *can* be swallowed by the globe
+fades out over the last few degrees rather than blinking off.
+
+Text is the one layer that cannot be allowed to overlap, so each label claims a
+screen rectangle as it is drawn and later ones that would collide are dropped.
+Array order is the priority — put what matters most first, or set
+`declutter: false` on a label that must always appear.
+
+Style options: `color`, `size`, `weight`, `family`, `font`, `placement`
+(`right` | `left` | `above` | `below` | `centre`), `gap`, `offset`, `dot`,
+`leader`, `halo`, `haloWidth`, `stem`, `fade`, `declutter`.
+
 ### Drawing a scene
 
 ```ts
 renderGlobe(ctx, viewport, state, {
   shapes: [routes, rings],
   orbits: [iss],
+  labels: [london, relay, tag],
   time: elapsedSeconds * 400,
 })
 ```
@@ -110,8 +155,8 @@ renderGlobe(ctx, viewport, state, {
 `time` is whatever clock you choose to run, in the same units as each orbit's
 period — scale it to set the animation speed.
 
-`src/globe/demoShapes.ts` and `src/globe/demoOrbits.ts` hold the demo content.
-Nothing else depends on them.
+`src/globe/demoShapes.ts`, `src/globe/demoOrbits.ts` and
+`src/globe/demoLabels.ts` hold the demo content. Nothing else depends on them.
 
 ### State
 

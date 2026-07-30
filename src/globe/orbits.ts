@@ -12,6 +12,7 @@
 import {
   buildMeshFromXyz,
   projectSpace,
+  spacePoint,
   strokeAbove,
   type Camera,
   type Mesh,
@@ -157,8 +158,8 @@ export function groundTrack(elements: OrbitElements, segments = 240): number[] {
 
 // Scratch, reused every frame.
 const here = { x: 0, y: 0, z: 0 }
-const screen: SpacePoint = { x: 0, y: 0, visible: false }
-const previous: SpacePoint = { x: 0, y: 0, visible: false }
+const screen: SpacePoint = spacePoint()
+const previous: SpacePoint = spacePoint()
 
 /**
  * Draw the orbits and their satellites at the given time.

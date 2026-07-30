@@ -12,6 +12,7 @@ import {
 import { shadeOcean } from './ocean'
 import type { Shape } from './shapes'
 import { drawOrbits, type Orbit } from './orbits'
+import { drawLabels, type Label } from './labels'
 
 /** Everything drawn on top of the globe itself. */
 export type Scene = {
@@ -19,6 +20,11 @@ export type Scene = {
   shapes?: readonly Shape[]
   /** Orbits standing off the surface, with their satellites. */
   orbits?: readonly Orbit[]
+  /**
+   * Text pinned to the surface, to points above it, or to moving entities.
+   * Drawn last, over everything else; earlier labels win any collision.
+   */
+  labels?: readonly Label[]
   /**
    * The clock driving satellite motion, in the same units as each orbit's
    * period. Scale it however fast you want the animation to run.
@@ -121,6 +127,12 @@ export function renderGlobe(
   // rather than the horizon test, and remain visible past its edge.
   if (scene.orbits?.length) {
     drawOrbits(ctx, camera, scene.orbits, scene.time ?? 0)
+  }
+
+  // Text on top of everything: it is the one layer that cannot be read through
+  // whatever is drawn over it.
+  if (scene.labels?.length) {
+    drawLabels(ctx, camera, scene.labels, scene.time ?? 0)
   }
 }
 

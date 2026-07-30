@@ -108,7 +108,20 @@ export function isOccluded(x: number, y: number, z: number) {
 }
 
 /** Screen position of a point above the surface, and whether it is visible. */
-export type SpacePoint = { x: number; y: number; visible: boolean }
+export type SpacePoint = {
+  x: number
+  y: number
+  visible: boolean
+  /** Camera-space depth in globe radii; positive is towards the camera. */
+  depth: number
+  /** Distance from the view axis in globe radii; 1 is the silhouette edge. */
+  offset: number
+}
+
+/** A fresh SpacePoint, for callers that keep one as scratch. */
+export function spacePoint(): SpacePoint {
+  return { x: 0, y: 0, visible: false, depth: 0, offset: 0 }
+}
 
 export function projectSpace(
   camera: Camera,
@@ -120,6 +133,8 @@ export function projectSpace(
   rotate(camera, x, y, z)
   out.x = camera.cx + rotated.x * camera.radius
   out.y = camera.cy - rotated.y * camera.radius
+  out.depth = rotated.z
+  out.offset = Math.sqrt(rotated.x * rotated.x + rotated.y * rotated.y)
   out.visible = !isOccluded(rotated.x, rotated.y, rotated.z)
   return out
 }

@@ -40,7 +40,8 @@ const DEG = Math.PI / 180
  */
 const DEFAULT_STEP_DEGREES = 1
 
-function toUnit([longitude, latitude]: LonLat) {
+/** A lon/lat pair as a point on the unit sphere. */
+export function toUnit([longitude, latitude]: LonLat) {
   const lon = longitude * DEG
   const lat = latitude * DEG
   const cosLat = Math.cos(lat)

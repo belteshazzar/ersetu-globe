@@ -4,6 +4,7 @@ import { globeCamera, renderGlobe, type Viewport } from '../globe/renderer'
 import { unproject } from '../globe/projection'
 import { DEMO_SHAPES } from '../globe/demoShapes'
 import { DEMO_ORBITS, DEMO_TIME_SCALE } from '../globe/demoOrbits'
+import { DEMO_LABELS } from '../globe/demoLabels'
 import './GlobeCanvas.css'
 
 const AUTO_ROTATE_SPEED = 0.0035 // radians per frame
@@ -72,6 +73,7 @@ export function GlobeCanvas() {
         renderGlobe(ctx, viewport, next, {
           shapes: DEMO_SHAPES,
           orbits: DEMO_ORBITS,
+          labels: DEMO_LABELS,
           time: next.elapsed * DEMO_TIME_SCALE,
         })
 
