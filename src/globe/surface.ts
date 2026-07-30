@@ -163,12 +163,15 @@ export function shadeSurface(
   options: ShadeOptions,
   grid: ElevationGrid | null,
   mesh: TerrainMesh | null,
+  exaggeration: number,
 ): SurfaceImage | null {
   const { cx, cy, radius } = camera
 
   // Only shade where the globe and the viewport actually overlap. Displaced
-  // terrain stands proud of the sphere, so the box has to allow for it.
-  const reach = radius * (grid && mesh ? 1.12 : 1)
+  // terrain stands proud of the sphere, so the box has to allow for however
+  // far the tallest ground is currently pushed out.
+  const reach =
+    radius * (grid && mesh ? 1 + mesh.maxLift * exaggeration + 0.002 : 1)
   const x0 = Math.max(0, Math.floor(cx - reach))
   const y0 = Math.max(0, Math.floor(cy - reach))
   const x1 = Math.min(viewport.width, Math.ceil(cx + reach))
@@ -208,7 +211,7 @@ export function shadeSurface(
   const image = { sea, land, width, height, x: x0, y: y0, w: cssW, h: cssH }
 
   if (grid && mesh && land) {
-    shadeTerrain(camera, grid, mesh, image, stepX, stepY)
+    shadeTerrain(camera, grid, mesh, image, stepX, stepY, exaggeration)
   } else {
     shadeSphere(camera, image, stepX, stepY, scale)
   }
@@ -283,6 +286,7 @@ function shadeTerrain(
   image: SurfaceImage,
   stepX: number,
   stepY: number,
+  exaggeration: number,
 ) {
   const { cx, cy, radius, cosLon, sinLon, cosLat, sinLat } = camera
   const { sea, land, width, height, x: x0, y: y0 } = image
@@ -290,7 +294,7 @@ function shadeTerrain(
 
   const place = placeBuffer(camera, x0, y0, stepX, stepY)
   const gbuffer = getGBuffer(width, height)
-  rasteriseTerrain(mesh, camera, place, gbuffer)
+  rasteriseTerrain(mesh, camera, place, gbuffer, exaggeration)
 
   const light = worldLight(camera)
   const invCellNorth = grid.height / (Math.PI * EARTH_RADIUS_M)

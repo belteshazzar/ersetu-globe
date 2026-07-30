@@ -104,6 +104,7 @@ export function renderGlobe(
     SHADE,
     scene.elevation ?? null,
     scene.terrain ?? null,
+    state.exaggeration,
   )
   if (surface) blit(ctx, surface, surface.sea)
 

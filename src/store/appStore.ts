@@ -11,6 +11,15 @@ export type AppState = {
   zoom: number
   /** Whether the idle spin animation is running. */
   autoRotate: boolean
+  /**
+   * How far the terrain is displaced, as a multiple of true height.
+   *
+   * Relief is only 0.14% of the Earth's radius at its highest, so at 1 the
+   * globe is indistinguishable from a sphere and at 0 it is exactly one. At 30
+   * Everest stands about 4% of a radius proud of sea level, which is a dozen
+   * pixels on the default globe.
+   */
+  exaggeration: number
   /** Frames rendered since mount, useful while bringing up the renderer. */
   frame: number
   /**
@@ -32,6 +41,7 @@ const initialState: AppState = {
   latitude: 0.35,
   zoom: 1,
   autoRotate: true,
+  exaggeration: 30,
   frame: 0,
   elapsed: 0,
   hoverLongitude: null,
@@ -43,6 +53,12 @@ export const appStore = createStore<AppState>(initialState)
 
 const HALF_PI = Math.PI / 2
 const TAU = Math.PI * 2
+
+/**
+ * Past this the globe stops reading as a globe: the deepest trenches fold in
+ * towards the centre and the silhouette turns to spikes.
+ */
+export const MAX_EXAGGERATION = 80
 
 /**
  * All mutations live here so components never call setState directly.
@@ -63,6 +79,9 @@ export const actions = {
   },
   setAutoRotate(autoRotate: boolean) {
     appStore.setState({ autoRotate })
+  },
+  setExaggeration(exaggeration: number) {
+    appStore.setState({ exaggeration: clamp(exaggeration, 0, MAX_EXAGGERATION) })
   },
   toggleAutoRotate() {
     actions.setAutoRotate(!appStore.getState().autoRotate)

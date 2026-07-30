@@ -31,14 +31,6 @@ import type { ElevationGrid } from './elevation'
 const EARTH_RADIUS_M = 6_371_000
 
 /**
- * How far the mesh is pushed around. Relief is only 0.14% of the radius at its
- * highest, so without this the geometry would move by a fraction of a pixel;
- * at 30x Everest stands about 4% of a radius proud of sea level, which is a
- * dozen pixels on the default globe.
- */
-export const EXAGGERATION = 30
-
-/**
  * Mesh resolution, in steps of longitude and latitude.
  *
  * There is no point carrying more triangles than the buffer has samples: past
@@ -53,8 +45,20 @@ export type TerrainMesh = {
   lonSteps: number
   latSteps: number
   vertexCount: number
-  /** Displaced positions in globe radii, xyz per vertex. */
-  positions: Float32Array
+  /** Unit direction of each vertex, xyz. The shape of the globe, undisplaced. */
+  directions: Float32Array
+  /**
+   * Height at each vertex, already divided by the Earth's radius, so a vertex
+   * sits at `1 + exaggeration * lift` globe radii.
+   *
+   * Kept apart from the direction so that exaggeration is not baked into the
+   * mesh: it becomes three multiplies in the per-frame vertex transform, and a
+   * control that changes it costs nothing rather than rebuilding fifty thousand
+   * vertices on every drag of a slider.
+   */
+  lifts: Float32Array
+  /** The largest outward lift, for sizing the area that needs shading. */
+  maxLift: number
   /** Where each vertex sits on the elevation grid, uv per vertex. */
   coords: Float32Array
 }
@@ -70,7 +74,6 @@ export type TerrainMesh = {
  */
 export function buildTerrain(
   grid: ElevationGrid,
-  exaggeration = EXAGGERATION,
   lonSteps = LON_STEPS,
   latSteps = LAT_STEPS,
 ): TerrainMesh {
@@ -78,10 +81,10 @@ export function buildTerrain(
   const rows = latSteps + 1
   const vertexCount = cols * rows
 
-  const positions = new Float32Array(vertexCount * 3)
+  const directions = new Float32Array(vertexCount * 3)
+  const lifts = new Float32Array(vertexCount)
   const coords = new Float32Array(vertexCount * 2)
-
-  const scale = exaggeration / EARTH_RADIUS_M
+  let maxLift = 0
 
   for (let j = 0; j < rows; j++) {
     // Rows run north to south, matching the grid.
@@ -94,24 +97,23 @@ export function buildTerrain(
       const u = (i / lonSteps) * grid.width - 0.5
       const longitude = (2 * Math.PI * i) / lonSteps - Math.PI
 
-      const x = cosLat * Math.sin(longitude)
-      const y = sinLat
-      const z = cosLat * Math.cos(longitude)
+      const vertex = j * cols + i
+      const at = vertex * 3
+      directions[at] = cosLat * Math.sin(longitude)
+      directions[at + 1] = sinLat
+      directions[at + 2] = cosLat * Math.cos(longitude)
 
-      const radius = 1 + sampleHeight(grid, u, v) * scale
+      const lift = sampleHeight(grid, u, v) / EARTH_RADIUS_M
+      lifts[vertex] = lift
+      if (lift > maxLift) maxLift = lift
 
-      const at = (j * cols + i) * 3
-      positions[at] = x * radius
-      positions[at + 1] = y * radius
-      positions[at + 2] = z * radius
-
-      const uv = (j * cols + i) * 2
+      const uv = vertex * 2
       coords[uv] = u
       coords[uv + 1] = v
     }
   }
 
-  return { lonSteps, latSteps, vertexCount, positions, coords }
+  return { lonSteps, latSteps, vertexCount, directions, lifts, maxLift, coords }
 }
 
 /**
@@ -229,8 +231,9 @@ export function rasteriseTerrain(
   camera: Camera,
   place: BufferPlacement,
   target: GBuffer,
+  exaggeration: number,
 ) {
-  const { positions, lonSteps, latSteps, vertexCount } = mesh
+  const { directions, lifts, lonSteps, latSteps, vertexCount } = mesh
   const { cosLon, sinLon, cosLat, sinLat } = camera
 
   if (screenX.length < vertexCount) {
@@ -243,9 +246,12 @@ export function rasteriseTerrain(
   // it - six, for every interior vertex of the grid.
   for (let i = 0; i < vertexCount; i++) {
     const at = i * 3
-    const x = positions[at]
-    const y = positions[at + 1]
-    const z = positions[at + 2]
+    // Displacing here rather than in the mesh is what makes exaggeration a
+    // free parameter: three multiplies on work the transform was doing anyway.
+    const radius = 1 + lifts[i] * exaggeration
+    const x = directions[at] * radius
+    const y = directions[at + 1] * radius
+    const z = directions[at + 2] * radius
 
     const x1 = x * cosLon - z * sinLon
     const z1 = x * sinLon + z * cosLon

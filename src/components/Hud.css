@@ -59,6 +59,70 @@
   text-align: right;
 }
 
+.hud__field {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 0.1rem;
+}
+
+.hud__field-label {
+  color: rgba(160, 210, 255, 0.55);
+}
+
+.hud__field-value {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The track and thumb are drawn by hand: the platform control brings its own
+   accent colour and chrome, neither of which belongs on this panel. */
+.hud__slider {
+  width: 100%;
+  margin: 0.35rem 0 0.9rem;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* Split rather than grouped: a selector list containing one pseudo-element the
+   browser does not know is dropped whole, taking the other with it. */
+.hud__slider::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(120, 190, 255, 0.25);
+}
+
+.hud__slider::-moz-range-track {
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(120, 190, 255, 0.25);
+}
+
+.hud__slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-top: -0.3rem;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(160, 210, 255, 0.9);
+}
+
+.hud__slider::-moz-range-thumb {
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(160, 210, 255, 0.9);
+}
+
+.hud__slider:focus-visible {
+  outline: 1px solid rgba(120, 190, 255, 0.5);
+  outline-offset: 0.35rem;
+  border-radius: 2px;
+}
+
 .hud__controls {
   display: flex;
   gap: 0.5rem;

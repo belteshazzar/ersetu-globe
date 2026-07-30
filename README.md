@@ -7,7 +7,9 @@ No WebGL, no mapping library, no tile server.
 
 **[Live demo](https://belteshazzar.github.io/ersetu-globe/)**
 
-Drag to rotate, scroll to zoom. The HUD reads out the lon/lat under the cursor.
+Drag to rotate, scroll to zoom. The HUD reads out the lon/lat under the cursor,
+and the **relief** slider sets how far the terrain is exaggerated — drop it to
+zero and the globe becomes a true sphere.
 
 ## Running it
 
@@ -63,7 +65,14 @@ into it, and the silhouette is not a circle — measured, the outline runs from
 
 Earth is smoother than it looks, which is why that needs exaggerating at all:
 Everest is 0.14% of the radius, so unexaggerated the whole range from the
-summit to the Challenger Deep would be under one pixel. `EXAGGERATION` is 30.
+summit to the Challenger Deep would be under one pixel. The **relief** slider
+in the HUD sets the factor, from 0 — a true sphere, useful for comparison — to
+80; it starts at 30.
+
+Exaggeration is free to change because it is not baked into the mesh. Vertices
+hold a unit direction and a height, and the per-frame transform puts them at
+`1 + exaggeration * lift`, so moving the slider costs three multiplies on work
+the transform was doing anyway rather than rebuilding fifty thousand vertices.
 
 The 2D canvas has no notion of depth, so a mountain can only hide what is
 behind it if we sort that out ourselves: `terrain.ts` is a small software

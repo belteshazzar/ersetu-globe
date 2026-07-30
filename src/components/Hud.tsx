@@ -1,4 +1,4 @@
-import { actions, useAppStore } from '../store/appStore'
+import { actions, MAX_EXAGGERATION, useAppStore } from '../store/appStore'
 import './Hud.css'
 
 const DEG = 180 / Math.PI
@@ -13,6 +13,7 @@ export function Hud() {
   const latitude = useAppStore((s) => Math.round(s.latitude * DEG))
   const zoom = useAppStore((s) => s.zoom.toFixed(2))
   const autoRotate = useAppStore((s) => s.autoRotate)
+  const exaggeration = useAppStore((s) => s.exaggeration)
 
   // Rounded inside the selector, so spinning the globe only re-renders when
   // the displayed figure actually changes.
@@ -37,6 +38,25 @@ export function Hud() {
           {overGlobe ? `${format(hoverLat, 'N', 'S')}  ${format(hoverLon, 'E', 'W')}` : '—'}
         </span>
       </div>
+      <div className="hud__field">
+        <label className="hud__field-label" htmlFor="relief">
+          relief
+        </label>
+        <span className="hud__field-value">
+          {exaggeration === 0 ? 'off' : `${exaggeration}×`}
+        </span>
+      </div>
+      <input
+        id="relief"
+        className="hud__slider"
+        type="range"
+        min={0}
+        max={MAX_EXAGGERATION}
+        step={1}
+        value={exaggeration}
+        onChange={(event) => actions.setExaggeration(event.target.valueAsNumber)}
+      />
+
       <div className="hud__controls">
         <button type="button" onClick={actions.toggleAutoRotate}>
           {autoRotate ? 'Pause' : 'Spin'}
