@@ -9,7 +9,8 @@ import {
   strokeMesh,
   type Camera,
 } from './projection'
-import { shadeOcean } from './ocean'
+import { shadeSurface, type SurfaceImage } from './surface'
+import type { ElevationGrid } from './elevation'
 import type { Shape } from './shapes'
 import { drawOrbits, type Orbit } from './orbits'
 import { drawLabels, type Label } from './labels'
@@ -25,6 +26,12 @@ export type Scene = {
    * Drawn last, over everything else; earlier labels win any collision.
    */
   labels?: readonly Label[]
+  /**
+   * Relief for the globe itself, rather than an overlay on it. Optional and
+   * loaded asynchronously: until it arrives the globe shades as smooth metal
+   * with the land cut out, which is what it did before there was any.
+   */
+  elevation?: ElevationGrid | null
   /**
    * The clock driving satellite motion, in the same units as each orbit's
    * period. Scale it however fast you want the animation to run.
@@ -87,15 +94,34 @@ export function renderGlobe(
   const camera = globeCamera(viewport, state)
   const { cx, cy, radius } = camera
 
-  paintMetal(ctx, camera, viewport)
+  const surface = shadeSurface(camera, viewport, SHADE, scene.elevation ?? null)
+  if (surface) blit(ctx, surface, surface.sea)
 
-  // Cut the land back out of the metal. Doing this with the real geometry -
-  // rather than masking it out during shading - keeps the coastline exactly
-  // aligned with the stroked outline below, and lets the canvas antialias it.
-  ctx.globalCompositeOperation = 'destination-out'
-  ctx.fillStyle = '#000'
-  fillPolygons(ctx, landfill, camera)
-  ctx.globalCompositeOperation = 'source-over'
+  // Land goes on with the real coastline geometry rather than a mask, which
+  // keeps its edge exactly on the stroked outline below and lets the canvas
+  // antialias it.
+  //
+  // With relief to draw, the land shading becomes the fill: the polygons are
+  // filled with the second shaded buffer as a pattern, aligned to the globe.
+  // Painting the land image over the whole disc and then cutting it to shape
+  // would mean scaling a second full-disc buffer up every frame, and that blit
+  // - not the shading - was the most expensive thing in the loop. This way the
+  // rasteriser only touches the third of the disc that is actually land.
+  //
+  // Without relief there is nothing to fill with, so the land is cut out and
+  // left as a hole, which is what the globe did before there was any.
+  if (surface?.land) {
+    const pattern = landPattern(ctx, surface)
+    if (pattern) {
+      ctx.fillStyle = pattern
+      fillPolygons(ctx, landfill, camera)
+    }
+  } else {
+    ctx.globalCompositeOperation = 'destination-out'
+    ctx.fillStyle = '#000'
+    fillPolygons(ctx, landfill, camera)
+    ctx.globalCompositeOperation = 'source-over'
+  }
 
   ctx.lineWidth = 1.25
   ctx.lineJoin = 'round'
@@ -136,19 +162,67 @@ export function renderGlobe(
   }
 }
 
-// Scratch canvas used to scale the shaded buffer up on blit. putImageData
-// ignores the current transform, so it cannot write to the main canvas directly.
+// Scratch canvas used to scale a shaded buffer up on blit. putImageData
+// ignores the current transform, so it cannot write to the main canvas
+// directly, and it ignores the composite operation too - hence the round trip
+// through drawImage, which honours both.
 let scratch: HTMLCanvasElement | null = null
 let scratchCtx: CanvasRenderingContext2D | null = null
 
-function paintMetal(
-  ctx: CanvasRenderingContext2D,
-  camera: Camera,
-  viewport: Viewport,
-) {
-  const image = shadeOcean(camera, viewport, SHADE)
-  if (!image) return
+// A second one, holding the land shading so it can be used as a fill.
+let landScratch: HTMLCanvasElement | null = null
+let landScratchCtx: CanvasRenderingContext2D | null = null
 
+/**
+ * The land shading as a pattern, positioned and scaled so that it lands on the
+ * globe exactly where the sea buffer does.
+ */
+function landPattern(
+  ctx: CanvasRenderingContext2D,
+  image: SurfaceImage,
+): CanvasPattern | null {
+  if (!image.land) return null
+
+  if (!landScratch) {
+    if (typeof document === 'undefined') return null
+    landScratch = document.createElement('canvas')
+    landScratchCtx = landScratch.getContext('2d')
+  }
+  if (!landScratch || !landScratchCtx) return null
+
+  if (landScratch.width !== image.width || landScratch.height !== image.height) {
+    landScratch.width = image.width
+    landScratch.height = image.height
+  }
+
+  landScratchCtx.putImageData(
+    new ImageData(
+      image.land.subarray(0, image.width * image.height * 4),
+      image.width,
+      image.height,
+    ),
+    0,
+    0,
+  )
+
+  const pattern = ctx.createPattern(landScratch, 'no-repeat')
+  if (!pattern) return null
+
+  // The buffer covers the globe's bounding box at a fraction of its size, so
+  // the pattern has to be scaled back up and moved into place.
+  pattern.setTransform(
+    new DOMMatrix()
+      .translateSelf(image.x, image.y)
+      .scaleSelf(image.w / image.width, image.h / image.height),
+  )
+  return pattern
+}
+
+function blit(
+  ctx: CanvasRenderingContext2D,
+  image: SurfaceImage,
+  data: Uint8ClampedArray<ArrayBuffer>,
+) {
   if (!scratch) {
     if (typeof document === 'undefined') return
     scratch = document.createElement('canvas')
@@ -162,12 +236,16 @@ function paintMetal(
   }
 
   scratchCtx.putImageData(
-    new ImageData(image.data.subarray(0, image.width * image.height * 4), image.width, image.height),
+    new ImageData(data.subarray(0, image.width * image.height * 4), image.width, image.height),
     0,
     0,
   )
 
+  // The buffer is only ever scaled up by about half again, and holds nothing
+  // but smooth gradients, so bilinear resampling is indistinguishable from the
+  // expensive filter here - and this is now done twice a frame. On a software
+  // rasteriser the high quality setting costs several times as much.
   ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
+  ctx.imageSmoothingQuality = 'low'
   ctx.drawImage(scratch, 0, 0, image.width, image.height, image.x, image.y, image.w, image.h)
 }

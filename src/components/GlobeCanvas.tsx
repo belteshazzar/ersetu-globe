@@ -5,6 +5,8 @@ import { unproject } from '../globe/projection'
 import { DEMO_SHAPES } from '../globe/demoShapes'
 import { DEMO_ORBITS, DEMO_TIME_SCALE } from '../globe/demoOrbits'
 import { DEMO_LABELS } from '../globe/demoLabels'
+import { loadElevation, type ElevationGrid } from '../globe/elevation'
+import elevationUrl from '../globe/data/elevation.bin?url'
 import './GlobeCanvas.css'
 
 const AUTO_ROTATE_SPEED = 0.0035 // radians per frame
@@ -22,6 +24,26 @@ export function GlobeCanvas() {
   const viewportRef = useRef<Viewport>({ width: 0, height: 0, dpr: 1 })
   // Latest pointer position in CSS pixels, or null when it is off the canvas.
   const pointerRef = useRef<{ x: number; y: number } | null>(null)
+  // Relief for the globe, once it has arrived. Held in a ref rather than
+  // state: the render loop reads it directly, and swapping it in should not
+  // re-render anything.
+  const elevationRef = useRef<ElevationGrid | null>(null)
+
+  // A few hundred kB that the first frames do not wait for. Until it lands the
+  // globe shades as smooth metal, which is what it looked like before.
+  useEffect(() => {
+    let cancelled = false
+    loadElevation(elevationUrl)
+      .then((grid) => {
+        if (!cancelled) elevationRef.current = grid
+      })
+      .catch((error: unknown) => {
+        console.warn('Elevation data unavailable; shading the globe flat.', error)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // Keep the backing store sized to the element and the display density.
   useEffect(() => {
@@ -74,6 +96,7 @@ export function GlobeCanvas() {
           shapes: DEMO_SHAPES,
           orbits: DEMO_ORBITS,
           labels: DEMO_LABELS,
+          elevation: elevationRef.current,
           time: next.elapsed * DEMO_TIME_SCALE,
         })
 

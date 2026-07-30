@@ -1,7 +1,8 @@
 # ersetu-globe
 
 A lightweight 3D globe with no runtime dependencies beyond React, rendered
-entirely with the 2D canvas API. No WebGL, no mapping library, no tile server.
+entirely with the 2D canvas API — including shaded topography and bathymetry.
+No WebGL, no mapping library, no tile server.
 
 **[Live demo](https://belteshazzar.github.io/ersetu-globe/)**
 
@@ -20,18 +21,20 @@ npm run dev
 | `npm run build` | type-check and build |
 | `npm run lint` | lint |
 | `npm run coastlines [110m\|50m]` | regenerate the coastline data |
+| `npm run elevation [width]` | regenerate the elevation grid (downloads 466 MB) |
 
 ## How it works
 
 Everything is drawn into one canvas, in layers:
 
-1. **The metal surface** is shaded per pixel — an environment reflection looked
-   up by the reflected ray's height, plus a Fresnel rim. It runs at a fraction
-   of display resolution and is scaled up on blit; it is all smooth gradient,
-   so nothing is lost.
-2. **Land is cut back out** of that shading using the real coastline geometry
-   rather than a bitmask, which keeps the edge aligned with the stroked outline
-   and lets the canvas antialias it.
+1. **The metal sea** is shaded per pixel — an environment reflection looked
+   up by the reflected ray's height, plus a Fresnel rim, darkened with depth
+   and modulated by the relief of the sea floor. It runs at a fraction of
+   display resolution and is scaled up on blit; it is all smooth gradient, so
+   nothing is lost.
+2. **Land is filled** with a second shaded buffer, using the real coastline
+   geometry as the fill rather than a bitmask, which keeps the edge aligned
+   with the stroked outline and lets the canvas antialias it.
 3. **Coastlines and the graticule** are stroked as vectors at full resolution.
 4. **Overlays** — surface geometry, then orbits, then labels.
 
@@ -43,6 +46,42 @@ multiplies through it.
 
 `src/globe/projection.ts` holds the projection, the horizon clipping, and
 `unproject`, which maps a screen position back to lon/lat.
+
+### Relief
+
+`src/globe/elevation.ts` and the relief half of `src/globe/surface.ts`.
+
+Earth is smoother than it looks: Everest is 0.14% of the radius, so at the
+default 288px globe the whole range from the summit to the Challenger Deep is
+under one pixel. Nothing would be visible without exaggeration — but relief
+*shading* works on gradients rather than heights, so it needs a slope gain of
+about 7 rather than the 20×–100× that displacing the geometry would.
+
+The elevation is never displaced. It modulates the lighting instead: the
+environment reflection describes the shape of the sphere, which is smooth, and
+terrain is a local brightening and darkening on top of it. That is both truer
+to what the eye reads as relief and far cheaper, because the whole terrain
+contribution is one scalar per pixel and it falls out with no vector rotation
+at all. For slopes `se`, `sn` in the local east/north frame the perturbed
+normal is `w - (se*e + sn*n)`, so
+
+```
+n'.L = (w.L - se(e.L) - sn(n.L)) / sqrt(1 + se^2 + sn^2)
+```
+
+The key light is fixed in camera space, so `L` is carried into world space once
+per frame rather than per pixel, and `e` and `n` come straight from the world
+normal with no trigonometry. `w.L` is what the smooth sphere would have given,
+so subtracting it leaves exactly the terrain's own contribution.
+
+Land and sea are shaded in the same pass, sharing the unprojection, the grid
+lookup and the slope. Sea gets the metal, darkened with depth; land gets a
+height ramp — four stops in `LAND_STOPS`, cool and dark rather than an atlas
+green-and-brown, since the relief should read from the shading. Change those
+stops for a physical-atlas palette.
+
+Relief costs about 1.5× a flat frame. If that matters, `SHADE.scale` in
+`renderer.ts` trades relief resolution against it directly.
 
 ### Surface geometry
 
@@ -166,9 +205,33 @@ reads state imperatively, so 60fps updates cost no React renders.
 
 ## Data
 
-Coastlines are Natural Earth 110m land polygons (public domain), converted to a
-compact committed module by `scripts/build-coastlines.mjs`. The app fetches
-nothing at runtime. `npm run coastlines 50m` swaps in the higher-detail set.
+**Coastlines** are Natural Earth 110m land polygons (public domain), converted
+to a compact committed module by `scripts/build-coastlines.mjs`.
+`npm run coastlines 50m` swaps in the higher-detail set.
+
+**Elevation** is [NOAA's ETOPO 2022 global relief
+model](https://www.ncei.noaa.gov/products/etopo-global-relief-model)
+([doi:10.25921/fd45-gt74](https://doi.org/10.25921/fd45-gt74)), free for any
+use except navigation. ETOPO is the useful source because it is seamless —
+topography and bathymetry come from one grid, so there is no coastline seam to
+reconcile between two datasets.
+
+`npm run elevation [width]` builds it. The published 60 arc-second GeoTIFF is
+466 MB of Deflate-compressed 32-bit float in 256×256 tiles; the script streams
+it, undoes the floating-point predictor, box-averages down to 2048×1024 and
+writes 16-bit metres. Averaging rather than sampling matters — keeping one
+15 arc-second cell out of every block would hold whichever peak or trench it
+landed on and drop the rest, which reads as speckle once it lights a surface.
+
+That grid is committed as `src/globe/data/elevation.bin`: 2.6 MB, stored as
+differences from the neighbouring sample and Deflate-compressed, which is
+roughly what a PNG would do. It is read back through `DecompressionStream`
+rather than as an image, because drawing a 16-bit PNG to a canvas is the one
+thing guaranteed to throw the low byte away. It is fetched once on load and the
+globe renders as smooth metal until it lands, so nothing waits for it.
+
+Both datasets ship with the app. Nothing else is fetched at runtime — no tiles,
+no APIs.
 
 ## Licence
 
