@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from 'react'
 import { createStore } from './createStore'
 
+export type SurfaceStyle = 'metal' | 'flat'
+
 /** Camera/orientation state for the globe, plus general app state. */
 export type AppState = {
   /** Rotation about the polar axis, radians. */
@@ -11,6 +13,12 @@ export type AppState = {
   zoom: number
   /** Whether the idle spin animation is running. */
   autoRotate: boolean
+  /**
+   * How the surface is coloured. `metal` reflects an environment gradient and
+   * ramps the land by height; `flat` is one colour for land and one for sea,
+   * left to the lighting to give them shape.
+   */
+  surface: SurfaceStyle
   /**
    * How far the terrain is displaced, as a multiple of true height.
    *
@@ -41,6 +49,7 @@ const initialState: AppState = {
   latitude: 0.35,
   zoom: 1,
   autoRotate: true,
+  surface: 'flat',
   exaggeration: 30,
   frame: 0,
   elapsed: 0,
@@ -79,6 +88,9 @@ export const actions = {
   },
   setAutoRotate(autoRotate: boolean) {
     appStore.setState({ autoRotate })
+  },
+  setSurface(surface: SurfaceStyle) {
+    appStore.setState({ surface })
   },
   setExaggeration(exaggeration: number) {
     appStore.setState({ exaggeration: clamp(exaggeration, 0, MAX_EXAGGERATION) })

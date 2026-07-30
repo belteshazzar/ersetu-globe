@@ -14,6 +14,7 @@ export function Hud() {
   const zoom = useAppStore((s) => s.zoom.toFixed(2))
   const autoRotate = useAppStore((s) => s.autoRotate)
   const exaggeration = useAppStore((s) => s.exaggeration)
+  const surface = useAppStore((s) => s.surface)
 
   // Rounded inside the selector, so spinning the globe only re-renders when
   // the displayed figure actually changes.
@@ -38,6 +39,26 @@ export function Hud() {
           {overGlobe ? `${format(hoverLat, 'N', 'S')}  ${format(hoverLon, 'E', 'W')}` : '—'}
         </span>
       </div>
+      <div className="hud__field">
+        <span className="hud__field-label">surface</span>
+        <span className="hud__toggle">
+          <button
+            type="button"
+            aria-pressed={surface === 'metal'}
+            onClick={() => actions.setSurface('metal')}
+          >
+            metal
+          </button>
+          <button
+            type="button"
+            aria-pressed={surface === 'flat'}
+            onClick={() => actions.setSurface('flat')}
+          >
+            flat
+          </button>
+        </span>
+      </div>
+
       <div className="hud__field">
         <label className="hud__field-label" htmlFor="relief">
           relief

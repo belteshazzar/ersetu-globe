@@ -7,9 +7,10 @@ No WebGL, no mapping library, no tile server.
 
 **[Live demo](https://belteshazzar.github.io/ersetu-globe/)**
 
-Drag to rotate, scroll to zoom. The HUD reads out the lon/lat under the cursor,
-and the **relief** slider sets how far the terrain is exaggerated — drop it to
-zero and the globe becomes a true sphere.
+Drag to rotate, scroll to zoom. The HUD reads out the lon/lat under the cursor;
+the **relief** slider sets how far the terrain is exaggerated — drop it to zero
+and the globe becomes a true sphere — and **surface** switches between a flat
+pair of colours and a metallic sea with land ramped by height.
 
 ## Running it
 
@@ -103,10 +104,18 @@ per frame rather than per pixel, and `e` and `n` come straight from the world
 normal with no trigonometry. `w.L` is what the unperturbed surface would have
 given, so subtracting it leaves exactly the terrain's own contribution.
 
-Land and sea are shaded in the same pass. Sea gets the metal, darkened with
-depth; land gets a height ramp — four stops in `LAND_STOPS`, cool and dark
-rather than an atlas green-and-brown, since the relief should read from the
-shading. Change those stops for a physical-atlas palette.
+Land and sea are shaded in the same pass, in one of two palettes.
+
+**flat** is one solid colour for each, `FLAT_LAND` and `FLAT_SEA`. They are
+still lit, because they have to be: with the geometry doing the work, an unlit
+solid colour would collapse the globe into a flat pair of silhouettes and throw
+away the very relief the displacement exists to show. Shading is the only thing
+carrying shape, and it uses the terrain-perturbed normal, so detail far below
+the mesh still reads.
+
+**metal** gives the sea an environment reflection darkened with depth, and
+ramps the land by height — four stops in `LAND_STOPS`, cool and dark rather
+than an atlas green-and-brown. Change those stops for a physical-atlas palette.
 
 Which of the two a sample gets comes from the elevation, not from the coastline
 polygons. Filling those instead is tempting — they are the crisper outline, and

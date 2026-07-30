@@ -28,11 +28,17 @@
  * trigonometry. `w.L` is what the unperturbed surface would have given, so
  * subtracting it leaves exactly the terrain's own contribution.
  *
- * Two images come out of one pass: the sea look and the land look. They share
- * every expensive term, and the renderer fills the coastline geometry with the
- * land one, so the shoreline stays exactly where the vector outline puts it.
+ * Land and sea are decided from the same grid sample that displaced the ground,
+ * so the colour cannot drift away from the shape - which it did when the
+ * coastline polygons were filled instead, since those are projected onto the
+ * undisplaced sphere.
+ *
+ * Two palettes are offered. `metal` reflects an environment gradient and ramps
+ * the land by height; `flat` is one colour for each, left to the lighting to
+ * give them shape.
  */
 import type { Camera } from './projection'
+import type { SurfaceStyle } from '../store/appStore'
 import { sampleReliefAt, type ElevationGrid, type Relief } from './elevation'
 import {
   getGBuffer,
@@ -119,6 +125,29 @@ for (let i = 0; i < RAMP_SIZE; i++) {
   landRamp[i * 3 + 2] = lo.color[2] + (hi.color[2] - lo.color[2]) * k
 }
 
+/**
+ * The flat palette: one colour for land, one for sea, and nothing looked up by
+ * height or by what the surface reflects.
+ *
+ * They are still lit, because they have to be. With displaced geometry doing
+ * the work, an unlit solid colour would collapse the globe into a flat pair of
+ * silhouettes and throw away the very relief the displacement exists to show;
+ * shading is the only thing that carries shape here. The ambient term sets how
+ * dark the ground turned away from the light goes.
+ */
+const FLAT_LAND = [132, 142, 150]
+const FLAT_SEA = [26, 68, 132]
+const FLAT_AMBIENT = 0.22
+
+/**
+ * The land colour at middling light, for the smooth sphere - which has no
+ * elevation to say where land is and so fills the coastline polygons flat
+ * rather than shading them. Only ever seen before the elevation arrives.
+ */
+export const FLAT_LAND_CSS = `rgb(${Math.round(FLAT_LAND[0] * 0.62)}, ${Math.round(
+  FLAT_LAND[1] * 0.62,
+)}, ${Math.round(FLAT_LAND[2] * 0.62)})`
+
 const EARTH_RADIUS_M = 6_371_000
 
 /**
@@ -167,6 +196,7 @@ export function shadeSurface(
   grid: ElevationGrid | null,
   mesh: TerrainMesh | null,
   exaggeration: number,
+  style: SurfaceStyle,
 ): SurfaceImage | null {
   const { cx, cy, radius } = camera
 
@@ -206,9 +236,9 @@ export function shadeSurface(
   const image = { pixels, terrain, width, height, x: x0, y: y0, w: cssW, h: cssH }
 
   if (grid && mesh) {
-    shadeTerrain(camera, grid, mesh, image, stepX, stepY, exaggeration)
+    shadeTerrain(camera, grid, mesh, image, stepX, stepY, exaggeration, style)
   } else {
-    shadeSphere(camera, image, stepX, stepY, scale)
+    shadeSphere(camera, image, stepX, stepY, scale, style)
   }
 
   return image
@@ -236,9 +266,11 @@ function shadeSphere(
   stepX: number,
   stepY: number,
   scale: number,
+  style: SurfaceStyle,
 ) {
   const { cx, cy, radius } = camera
   const { pixels, width, height, x: x0, y: y0 } = image
+  const solid = style === 'flat'
 
   const feather = Math.min(0.5, 1.5 / (radius * scale))
   const featherStart = (1 - feather) * (1 - feather)
@@ -256,15 +288,27 @@ function shadeSphere(
       if (r2 >= 1) continue
 
       const nz = Math.sqrt(1 - r2)
-      const base = 0.82 + 0.18 * Math.max(0, nx * LX + nyLY + nz * LZ)
+      const lambert = nx * LX + nyLY + nz * LZ
+      const alpha =
+        r2 > featherStart ? 255 * Math.min(1, (1 - Math.sqrt(r2)) / feather) : 255
+
+      if (solid) {
+        const gain = FLAT_AMBIENT + (1 - FLAT_AMBIENT) * (lambert > 0 ? lambert : 0)
+        pixels[index] = FLAT_SEA[0] * gain
+        pixels[index + 1] = FLAT_SEA[1] * gain
+        pixels[index + 2] = FLAT_SEA[2] * gain
+        pixels[index + 3] = alpha
+        continue
+      }
+
+      const base = 0.82 + 0.18 * Math.max(0, lambert)
       const fresnel = fresnelAt(nz)
 
       environment(nz * ny + 0.5)
       pixels[index] = env[0] * base + fresnel * RIM_TINT[0]
       pixels[index + 1] = env[1] * base + fresnel * RIM_TINT[1]
       pixels[index + 2] = env[2] * base + fresnel * RIM_TINT[2]
-      pixels[index + 3] =
-        r2 > featherStart ? 255 * Math.min(1, (1 - Math.sqrt(r2)) / feather) : 255
+      pixels[index + 3] = alpha
     }
   }
 }
@@ -282,9 +326,11 @@ function shadeTerrain(
   stepX: number,
   stepY: number,
   exaggeration: number,
+  style: SurfaceStyle,
 ) {
   const { cx, cy, radius, cosLon, sinLon, cosLat, sinLat } = camera
   const { pixels, width, height, x: x0, y: y0 } = image
+  const solid = style === 'flat'
 
   const place = placeBuffer(camera, x0, y0, stepX, stepY)
   const gbuffer = getGBuffer(width, height)
@@ -360,13 +406,6 @@ function shadeTerrain(
       if (landness < 0) landness = 0
       else if (landness > 1) landness = 1
 
-      let ramp = elevation > 0 ? (elevation * RAMP_SCALE) | 0 : 0
-      if (ramp >= RAMP_SIZE) ramp = RAMP_SIZE - 1
-      ramp *= 3
-      const landGain = 1 + LAND_RELIEF * shade + 0.12 * (flat > 0 ? flat : 0)
-
-      const deep = elevation < 0 ? Math.min(1, -elevation / FULL_DEPTH) : 0
-      const seaGain = base * (1 - DEPTH_DARKEN * deep) + SEA_RELIEF * shade
       const wet = 1 - landness
 
       // The rasteriser decides coverage per whole sample, so the silhouette
@@ -381,6 +420,26 @@ function shadeTerrain(
       if (bx === width - 1 || depth[sample + 1] === NOT_COVERED) covered--
       if (by === 0 || depth[sample - width] === NOT_COVERED) covered--
       if (by === height - 1 || depth[sample + width] === NOT_COVERED) covered--
+      pixels[index + 3] = covered === 4 ? 255 : 176 + covered * 20
+
+      if (solid) {
+        // One colour each, carried entirely by the light. `tilted` is the
+        // surface normal against the key light with the terrain's own slope
+        // already folded in, so fine relief still shows under a flat palette.
+        const gain = FLAT_AMBIENT + (1 - FLAT_AMBIENT) * (tilted > 0 ? tilted : 0)
+        pixels[index] = (FLAT_SEA[0] * wet + FLAT_LAND[0] * landness) * gain
+        pixels[index + 1] = (FLAT_SEA[1] * wet + FLAT_LAND[1] * landness) * gain
+        pixels[index + 2] = (FLAT_SEA[2] * wet + FLAT_LAND[2] * landness) * gain
+        continue
+      }
+
+      let ramp = elevation > 0 ? (elevation * RAMP_SCALE) | 0 : 0
+      if (ramp >= RAMP_SIZE) ramp = RAMP_SIZE - 1
+      ramp *= 3
+      const landGain = 1 + LAND_RELIEF * shade + 0.12 * (flat > 0 ? flat : 0)
+
+      const deep = elevation < 0 ? Math.min(1, -elevation / FULL_DEPTH) : 0
+      const seaGain = base * (1 - DEPTH_DARKEN * deep) + SEA_RELIEF * shade
 
       pixels[index] =
         (env[0] * seaGain + fresnel * RIM_TINT[0]) * wet +
@@ -391,7 +450,6 @@ function shadeTerrain(
       pixels[index + 2] =
         (env[2] * seaGain + fresnel * RIM_TINT[2]) * wet +
         landRamp[ramp + 2] * landGain * landness
-      pixels[index + 3] = covered === 4 ? 255 : 176 + covered * 20
     }
   }
 }

@@ -9,7 +9,7 @@ import {
   strokeMesh,
   type Camera,
 } from './projection'
-import { shadeSurface, type SurfaceImage } from './surface'
+import { shadeSurface, FLAT_LAND_CSS, type SurfaceImage } from './surface'
 import type { ElevationGrid } from './elevation'
 import type { TerrainMesh } from './terrain'
 import type { Shape } from './shapes'
@@ -29,10 +29,10 @@ export type Scene = {
   labels?: readonly Label[]
   /**
    * Relief for the globe itself, rather than an overlay on it. Optional and
-   * loaded asynchronously: until it arrives the globe shades as smooth metal
-   * with the land cut out, which is what it did before there was any.
-   * `terrain` is the displaced mesh built from `elevation`; both are needed
-   * before the globe takes on any shape.
+   * loaded asynchronously: until it arrives the globe is a smooth sphere with
+   * its land taken from the coastline geometry instead. `terrain` is the
+   * displaced mesh built from `elevation`; both are needed before the globe
+   * takes on any shape.
    */
   elevation?: ElevationGrid | null
   terrain?: TerrainMesh | null
@@ -105,20 +105,28 @@ export function renderGlobe(
     scene.elevation ?? null,
     scene.terrain ?? null,
     state.exaggeration,
+    state.surface,
   )
   if (surface) blit(ctx, surface, surface.pixels)
 
   // Displaced terrain already knows which of its samples are land, from the
   // same elevation that gave them their shape, so it arrives coloured.
   //
-  // The bare sphere does not - there is no elevation to ask - so its land is
-  // cut out with the real coastline geometry rather than a bitmask, which
-  // keeps the edge on the stroked outline and lets the canvas antialias it.
+  // The bare sphere does not - there is no elevation to ask - so it falls back
+  // to the real coastline geometry, which keeps the edge on the stroked
+  // outline and lets the canvas antialias it. Only seen before the elevation
+  // arrives, or if it never does.
   if (!surface?.terrain) {
-    ctx.globalCompositeOperation = 'destination-out'
-    ctx.fillStyle = '#000'
-    fillPolygons(ctx, landfill, camera)
-    ctx.globalCompositeOperation = 'source-over'
+    if (state.surface === 'flat') {
+      // Flat wants land solid, not absent, so fill rather than cut.
+      ctx.fillStyle = FLAT_LAND_CSS
+      fillPolygons(ctx, landfill, camera)
+    } else {
+      ctx.globalCompositeOperation = 'destination-out'
+      ctx.fillStyle = '#000'
+      fillPolygons(ctx, landfill, camera)
+      ctx.globalCompositeOperation = 'source-over'
+    }
   }
 
   ctx.lineWidth = 1.25
@@ -195,10 +203,9 @@ function blit(
     0,
   )
 
-  // The buffer is only ever scaled up by about half again, and holds nothing
-  // but smooth gradients, so bilinear resampling is indistinguishable from the
-  // expensive filter here - and this is now done twice a frame. On a software
-  // rasteriser the high quality setting costs several times as much.
+  // The buffer is only ever scaled up by about half again, so bilinear
+  // resampling is indistinguishable from the expensive filter here, and on a
+  // software rasteriser the high quality setting costs several times as much.
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = 'low'
   ctx.drawImage(scratch, 0, 0, image.width, image.height, image.x, image.y, image.w, image.h)

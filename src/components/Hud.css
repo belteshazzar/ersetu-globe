@@ -75,6 +75,32 @@
   font-variant-numeric: tabular-nums;
 }
 
+.hud__toggle {
+  display: flex;
+  gap: 0.15rem;
+}
+
+.hud__toggle button {
+  padding: 0.15rem 0.45rem;
+  border: 1px solid transparent;
+  border-radius: 0.25rem;
+  background: transparent;
+  color: rgba(160, 210, 255, 0.5);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.hud__toggle button:hover {
+  color: rgba(226, 238, 255, 0.85);
+}
+
+.hud__toggle button[aria-pressed='true'] {
+  border-color: rgba(120, 190, 255, 0.35);
+  background: rgba(120, 190, 255, 0.12);
+  color: rgba(226, 238, 255, 0.95);
+}
+
 /* The track and thumb are drawn by hand: the platform control brings its own
    accent colour and chrome, neither of which belongs on this panel. */
 .hud__slider {
