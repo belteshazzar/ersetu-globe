@@ -3,15 +3,6 @@ import { createStore } from './createStore'
 
 export type SurfaceStyle = 'metal' | 'flat'
 
-/**
- * Where the globe's geometry comes from.
- *
- * `uniform` is the fixed lon/lat mesh built once from the elevation; `quadtree`
- * refines an octahedron per frame against the camera, so detail follows the
- * zoom instead of being decided when the data landed.
- */
-export type MeshMode = 'uniform' | 'quadtree'
-
 /** Camera/orientation state for the globe, plus general app state. */
 export type AppState = {
   /** Rotation about the polar axis, radians. */
@@ -28,8 +19,6 @@ export type AppState = {
    * left to the lighting to give them shape.
    */
   surface: SurfaceStyle
-  /** Where the globe's geometry comes from. */
-  mesh: MeshMode
   /**
    * Triangles the last frame's geometry cost, rounded to the nearest hundred.
    *
@@ -71,7 +60,6 @@ const initialState: AppState = {
   zoom: 1,
   autoRotate: true,
   surface: 'flat',
-  mesh: 'quadtree',
   meshTriangles: 0,
   detail: 0,
   exaggeration: 30,
@@ -115,9 +103,6 @@ export const actions = {
   },
   setSurface(surface: SurfaceStyle) {
     appStore.setState({ surface })
-  },
-  setMesh(mesh: MeshMode) {
-    appStore.setState({ mesh })
   },
   /**
    * Report what the last frame's geometry cost. Called from the render loop, so

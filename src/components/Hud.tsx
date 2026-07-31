@@ -15,7 +15,6 @@ export function Hud() {
   const autoRotate = useAppStore((s) => s.autoRotate)
   const exaggeration = useAppStore((s) => s.exaggeration)
   const surface = useAppStore((s) => s.surface)
-  const mesh = useAppStore((s) => s.mesh)
   const triangles = useAppStore((s) => s.meshTriangles)
   const detail = useAppStore((s) => s.detail)
 
@@ -62,25 +61,6 @@ export function Hud() {
         </span>
       </div>
 
-      <div className="hud__field">
-        <span className="hud__field-label">mesh</span>
-        <span className="hud__toggle">
-          <button
-            type="button"
-            aria-pressed={mesh === 'uniform'}
-            onClick={() => actions.setMesh('uniform')}
-          >
-            uniform
-          </button>
-          <button
-            type="button"
-            aria-pressed={mesh === 'quadtree'}
-            onClick={() => actions.setMesh('quadtree')}
-          >
-            quadtree
-          </button>
-        </span>
-      </div>
       <div className="hud__field">
         <span className="hud__field-label">triangles</span>
         <span className="hud__field-value">{formatCount(triangles)}</span>

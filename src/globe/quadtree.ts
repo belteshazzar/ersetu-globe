@@ -1,11 +1,12 @@
 /**
  * The globe as a view-dependent quadtree, rather than one fixed lon/lat mesh.
  *
- * The uniform mesh in `terrain.ts` carries the same number of triangles
- * wherever you look: half of them are behind the globe, the ones near the poles
- * are crushed into slivers, and zooming in gains no detail at all because the
- * mesh was built once and cannot get any finer. This builds the mesh per frame
- * instead, refining only where the screen can show the difference.
+ * A fixed lon/lat mesh - which is what this replaced - carries the same number
+ * of triangles wherever you look: half of them are behind the globe, the ones
+ * near the poles are crushed into slivers, and zooming in gains no detail at
+ * all because the mesh was built once and cannot get any finer. This builds the
+ * mesh per frame instead, refining only where the screen can show the
+ * difference.
  *
  * The base is an octahedron - eight spherical triangles, corners at the poles
  * and at four points around the equator. A sphere has no seamless square

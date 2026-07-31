@@ -5,22 +5,25 @@
  * `scripts/build-terrain.mjs` writes a pyramid of 128-sample tiles rooted so
  * that level 0 is four tiles around by two down - the eight lon/lat boxes of
  * the octahedron the quadtree starts from - and doubling each level after
- * that. The whole pyramid is one file: a header, an index, and the tile
- * payloads back to back.
+ * that. Each level is its own file: a header, an index, and the tile payloads
+ * back to back.
  *
- * One file matters. A tile per file would be thousands of entries in the
- * package and thousands of round trips; a tile per file behind a server would
- * need a server. Instead the client reads the index once and then asks for byte
- * ranges, which every static host already does - GitHub Pages, S3, any CDN -
- * with no server logic anywhere. If a host turns out not to honour Range it
- * says so by sending the whole file, and this notices and serves every tile
- * from memory thereafter, so the fallback is one download rather than a
- * failure.
+ * Level 0 comes whole, in one plain GET. It is 191 kB, it is the entire world,
+ * and nothing can be drawn without it, so there is no sense paying a round trip
+ * for an index and another for the tiles. Deeper levels are opened only when
+ * something wants them - one small range request for the index, then ranges for
+ * the tiles - which every static host serves with no server logic anywhere. A
+ * host that will not honour Range says so by sending the whole file, and this
+ * notices and serves every tile out of memory thereafter.
  *
  * What that buys is the difference between 191 kB and 3.6 MB before the globe
  * has any shape. Level 0 draws the whole world; everything after it is detail
  * fetched for the part being looked at, and a session that never leaves one
  * hemisphere never pays for the other.
+ *
+ * A level that was never deployed is asked for once, takes the 404, and is
+ * written off for good - so the deep levels are genuinely optional, and a
+ * deployment can add one by uploading a file.
  *
  * Sampling always succeeds. Asking for a level that has not arrived walks up
  * the pyramid to the finest ancestor that has, so the picture is never missing,
@@ -697,59 +700,4 @@ function local(it: Archive, z: number, u: number, v: number) {
     wrapped * width - 0.5 - tileIndexX(z, u) * it.tileSize + it.border
   site.fy = v * height - 0.5 - tileIndexY(z, v) * it.tileSize + it.border
   return site
-}
-
-// --- Whole grids ----------------------------------------------------------
-
-export type ElevationGrid = {
-  width: number
-  height: number
-  /**
-   * Metres above sea level, row major. Row 0 is latitude +90 and column 0 is
-   * longitude -180, each sample being the centre of its cell.
-   */
-  data: Int16Array
-}
-
-/**
- * Stitch a whole level into one plain grid.
- *
- * Only the fixed lon/lat mesh wants this - it is built once, from everything,
- * which is the thing the quadtree exists not to do. Returns null until every
- * tile of the level is resident, having asked for the ones that are not.
- */
-export function assembleGrid(level: number): ElevationGrid | null {
-  const it = archive
-  if (!it || level >= it.levels) return null
-
-  const across = tilesAcross(level)
-  const down = tilesDown(level)
-  let missing = 0
-  for (let y = 0; y < down; y++) {
-    for (let x = 0; x < across; x++) {
-      if (!tiles.has(tileId(level, x, y))) {
-        want(level, x, y)
-        missing++
-      }
-    }
-  }
-  if (missing) {
-    pump()
-    return null
-  }
-
-  const width = levelWidth(level)
-  const height = width / 2
-  const data = new Int16Array(width * height)
-  for (let ty = 0; ty < down; ty++) {
-    for (let tx = 0; tx < across; tx++) {
-      const tile = tiles.get(tileId(level, tx, ty))!.samples
-      for (let y = 0; y < it.tileSize; y++) {
-        const from = (y + it.border) * it.stored + it.border
-        const to = (ty * it.tileSize + y) * width + tx * it.tileSize
-        data.set(tile.subarray(from, from + it.tileSize), to)
-      }
-    }
-  }
-  return { width, height, data }
 }

@@ -16,7 +16,6 @@ import {
   FLAT_LAND_CSS,
   type SurfaceImage,
 } from './surface'
-import type { TerrainMesh } from './terrain'
 import { pump, tick as tickTerrain } from './tiles'
 import type { Shape } from './shapes'
 import { drawOrbits, type Orbit } from './orbits'
@@ -34,14 +33,6 @@ export type Scene = {
    * Drawn last, over everything else; earlier labels win any collision.
    */
   labels?: readonly Label[]
-  /**
-   * The fixed lon/lat mesh, for the `uniform` mesh mode only.
-   *
-   * The quadtree needs nothing here: it reads the tile store directly and
-   * builds its geometry per frame. Until the first tiles land the globe is a
-   * smooth sphere with its land taken from the coastline geometry instead.
-   */
-  terrain?: TerrainMesh | null
   /**
    * Small 3D models standing on the surface or flying above it. Loaded
    * asynchronously, so this is simply empty until they arrive.
@@ -110,7 +101,7 @@ export function renderGlobe(
   const { cx, cy, radius } = camera
 
   tickTerrain()
-  const surface = shadeSurface(camera, viewport, SHADE, scene.terrain ?? null, state)
+  const surface = shadeSurface(camera, viewport, SHADE, state)
   // Selection has now had its say about which tiles this view wants, so the
   // fetches go out here - after the frame, in the order it decided.
   pump()

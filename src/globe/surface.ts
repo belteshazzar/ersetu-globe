@@ -38,14 +38,8 @@
  * give them shape.
  */
 import type { Camera } from './projection'
-import type { MeshMode, SurfaceStyle } from '../store/appStore'
-import {
-  getGBuffer,
-  placeBuffer,
-  rasteriseTerrain,
-  NOT_COVERED,
-  type TerrainMesh,
-} from './terrain'
+import type { SurfaceStyle } from '../store/appStore'
+import { getGBuffer, placeBuffer, NOT_COVERED } from './terrain'
 import { quadtreeStats, rasteriseQuadtree } from './quadtree'
 import { relief as makeRelief, sampleRelief, terrainState, type Relief } from './tiles'
 
@@ -56,7 +50,6 @@ import { relief as makeRelief, sampleRelief, terrainState, type Relief } from '.
 export type SurfaceView = {
   exaggeration: number
   surface: SurfaceStyle
-  mesh: MeshMode
 }
 
 export type SurfaceImage = {
@@ -232,23 +225,20 @@ export function shadeSurface(
   camera: Camera,
   viewport: { width: number; height: number },
   options: ShadeOptions,
-  mesh: TerrainMesh | null,
   view: SurfaceView,
 ): SurfaceImage | null {
   const { cx, cy, radius } = camera
   const { exaggeration, surface: style } = view
   const terrain = terrainState()
 
-  // The quadtree builds its geometry from the tiles each frame, so it needs
-  // nothing built ahead of time; the uniform mesh has to have arrived.
-  const quadtree = view.mesh === 'quadtree'
-  const displaced = terrain.ready && (quadtree || Boolean(mesh))
+  // The quadtree builds its geometry from the tiles each frame, so there is
+  // nothing to wait for beyond the tiles themselves.
+  const displaced = terrain.ready
 
   // Only shade where the globe and the viewport actually overlap. Displaced
   // terrain stands proud of the sphere, so the box has to allow for however
   // far the tallest ground is currently pushed out.
-  const lift = quadtree ? terrain.maxLift : (mesh?.maxLift ?? 0)
-  const reach = radius * (displaced ? 1 + lift * exaggeration + 0.002 : 1)
+  const reach = radius * (displaced ? 1 + terrain.maxLift * exaggeration + 0.002 : 1)
   const x0 = Math.max(0, Math.floor(cx - reach))
   const y0 = Math.max(0, Math.floor(cy - reach))
   const x1 = Math.min(viewport.width, Math.ceil(cx + reach))
@@ -288,7 +278,7 @@ export function shadeSurface(
   }
 
   if (displaced) {
-    shadeTerrain(camera, mesh, image, stepX, stepY, view)
+    shadeTerrain(camera, image, stepX, stepY, view)
   } else {
     shadeSphere(camera, image, stepX, stepY, scale, style)
   }
@@ -379,7 +369,6 @@ function shadeSphere(
  */
 function shadeTerrain(
   camera: Camera,
-  mesh: TerrainMesh | null,
   image: SurfaceImage,
   stepX: number,
   stepY: number,
@@ -393,13 +382,8 @@ function shadeTerrain(
   const place = placeBuffer(camera, x0, y0, stepX, stepY)
   const gbuffer = getGBuffer(width, height)
   const detail = detailLevel(radius, stepX)
-  if (view.mesh === 'quadtree' || !mesh) {
-    rasteriseQuadtree(camera, place, gbuffer, exaggeration, detail)
-    lastTriangles = quadtreeStats().triangles
-  } else {
-    rasteriseTerrain(mesh, camera, place, gbuffer, exaggeration)
-    lastTriangles = mesh.lonSteps * mesh.latSteps * 2
-  }
+  rasteriseQuadtree(camera, place, gbuffer, exaggeration, detail)
+  lastTriangles = quadtreeStats().triangles
 
   const light = worldLight(camera)
   const groundPerSample = groundAt(detail)

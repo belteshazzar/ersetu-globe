@@ -1,11 +1,13 @@
 /**
- * The globe as displaced geometry rather than a painted sphere.
+ * The G-buffer, and the triangle rasteriser that fills it.
  *
- * Every vertex of a lon/lat mesh is pushed out to `1 + k*h`, so mountains
- * genuinely stand off the surface and basins genuinely sink into it. The mesh
- * is then rasterised here, in software, with a depth buffer - the 2D canvas has
- * no notion of depth, so a mountain can only hide what is behind it if we sort
- * that out ourselves.
+ * The globe is displaced geometry rather than a painted sphere: every vertex is
+ * pushed out to `1 + k*h`, so mountains genuinely stand off the surface and
+ * basins genuinely sink into it. That geometry is rasterised here, in software,
+ * with a depth buffer - the 2D canvas has no notion of depth, so a mountain can
+ * only hide what is behind it if we sort that out ourselves. The triangles
+ * themselves come from `quadtree.ts`, which decides per frame what the camera
+ * is close enough to see.
  *
  * Two things make this much cheaper than it sounds.
  *
@@ -13,12 +15,12 @@
  * attributes interpolate exactly with plain screen-space barycentrics and no
  * correction is needed anywhere.
  *
- * And the rasteriser does not shade. It writes only where on the elevation grid
- * each covered sample landed, plus its depth - a G-buffer - and the shading
- * pass then reads the full resolution grid per pixel. Geometry is therefore
- * limited by the mesh, but the shading is not: the relief keeps every bit of
- * the detail it had when it was only a lighting trick, while the silhouette,
- * the parallax and the occlusion become real.
+ * And the rasteriser does not shade. It writes only where on the globe each
+ * covered sample landed, plus its depth - a G-buffer - and the shading pass
+ * then reads the terrain tiles per pixel. Geometry is therefore limited by the
+ * mesh, but the shading is not: the relief keeps every bit of the detail it had
+ * when it was only a lighting trick, while the silhouette, the parallax and the
+ * occlusion become real.
  *
  * The surface is closed and star-shaped about the centre - a radial height
  * field has no overhangs - so any back-facing triangle is hidden by front-
@@ -26,139 +28,6 @@
  * mesh before rasterising.
  */
 import type { Camera } from './projection'
-import type { ElevationGrid } from './tiles'
-
-const EARTH_RADIUS_M = 6_371_000
-
-/**
- * Mesh resolution, in steps of longitude and latitude.
- *
- * There is no point carrying more triangles than the buffer has samples: past
- * that they cost their setup and cover nothing. This lands a little under one
- * triangle per sample at the default size, which is where the cost of the
- * setup and the cost of the coverage are about even.
- */
-const LON_STEPS = 320
-const LAT_STEPS = 160
-
-export type TerrainMesh = {
-  lonSteps: number
-  latSteps: number
-  vertexCount: number
-  /** Unit direction of each vertex, xyz. The shape of the globe, undisplaced. */
-  directions: Float32Array
-  /**
-   * Height at each vertex, already divided by the Earth's radius, so a vertex
-   * sits at `1 + exaggeration * lift` globe radii.
-   *
-   * Kept apart from the direction so that exaggeration is not baked into the
-   * mesh: it becomes three multiplies in the per-frame vertex transform, and a
-   * control that changes it costs nothing rather than rebuilding fifty thousand
-   * vertices on every drag of a slider.
-   */
-  lifts: Float32Array
-  /** The largest outward lift, for sizing the area that needs shading. */
-  maxLift: number
-  /**
-   * Where each vertex sits on the globe, uv per vertex: longitude eastward
-   * from the antimeridian and latitude southward from the north pole, both as
-   * fractions of the whole.
-   *
-   * Normalised rather than in grid cells because the shading pass no longer
-   * reads one fixed grid - it reads whichever level of the tile pyramid has
-   * arrived - and these are interpolated across a triangle by a rasteriser
-   * that has no business knowing which that will be.
-   */
-  coords: Float32Array
-}
-
-/**
- * Build the displaced mesh. Done once, when the elevation arrives: the shape
- * is fixed in the globe's own frame, and only the camera moves.
- *
- * The seam at the antimeridian gets a duplicate column whose grid coordinate
- * runs on to the full width rather than wrapping to zero, so that triangles
- * spanning it interpolate forwards across the join instead of racing back
- * around the world.
- */
-export function buildTerrain(
-  grid: ElevationGrid,
-  lonSteps = LON_STEPS,
-  latSteps = LAT_STEPS,
-): TerrainMesh {
-  const cols = lonSteps + 1
-  const rows = latSteps + 1
-  const vertexCount = cols * rows
-
-  const directions = new Float32Array(vertexCount * 3)
-  const lifts = new Float32Array(vertexCount)
-  const coords = new Float32Array(vertexCount * 2)
-  let maxLift = 0
-
-  for (let j = 0; j < rows; j++) {
-    // Rows run north to south, matching the grid.
-    const v = j / latSteps
-    const latitude = (Math.PI / 2) * (1 - (2 * j) / latSteps)
-    const cosLat = Math.cos(latitude)
-    const sinLat = Math.sin(latitude)
-
-    for (let i = 0; i < cols; i++) {
-      const u = i / lonSteps
-      const longitude = (2 * Math.PI * i) / lonSteps - Math.PI
-
-      const vertex = j * cols + i
-      const at = vertex * 3
-      directions[at] = cosLat * Math.sin(longitude)
-      directions[at + 1] = sinLat
-      directions[at + 2] = cosLat * Math.cos(longitude)
-
-      const lift =
-        sampleHeight(grid, u * grid.width - 0.5, v * grid.height - 0.5) / EARTH_RADIUS_M
-      lifts[vertex] = lift
-      if (lift > maxLift) maxLift = lift
-
-      const uv = vertex * 2
-      coords[uv] = u
-      coords[uv + 1] = v
-    }
-  }
-
-  return { lonSteps, latSteps, vertexCount, directions, lifts, maxLift, coords }
-}
-
-/**
- * Bilinear height at fractional grid coordinates.
- *
- * Deliberately not `sampleReliefAt`: this runs once per vertex at build time
- * and wants only the height, not the slope, and it must not let the poles fold
- * over onto the far side of the globe.
- */
-export function sampleHeight(grid: ElevationGrid, fx: number, fy: number): number {
-  const { width, height, data } = grid
-
-  let x0 = Math.floor(fx)
-  const tx = fx - x0
-  if (x0 < 0 || x0 >= width) x0 %= width
-  if (x0 < 0) x0 += width
-  const x1 = x0 + 1 < width ? x0 + 1 : 0
-
-  let y0 = Math.floor(fy)
-  let ty = fy - y0
-  if (y0 < 0) {
-    y0 = 0
-    ty = 0
-  } else if (y0 >= height - 1) {
-    y0 = height - 1
-    ty = 0
-  }
-  const y1 = y0 + 1 < height ? y0 + 1 : y0
-
-  const rowA = y0 * width
-  const rowB = y1 * width
-  const top = data[rowA + x0] + (data[rowA + x1] - data[rowA + x0]) * tx
-  const bottom = data[rowB + x0] + (data[rowB + x1] - data[rowB + x0]) * tx
-  return top + (bottom - top) * ty
-}
 
 /**
  * What the rasteriser leaves behind for the shading pass: where on the
@@ -202,11 +71,6 @@ export function getGBuffer(width: number, height: number): GBuffer {
   return gbuffer
 }
 
-// Per-frame vertex arrays, grown as needed and reused.
-let screenX = new Float32Array(0)
-let screenY = new Float32Array(0)
-let screenZ = new Float32Array(0)
-
 /**
  * How the buffer's samples line up with the globe on screen. The shading pass
  * walks samples and derives camera coordinates; the rasteriser has to go the
@@ -235,88 +99,18 @@ export function placeBuffer(
   }
 }
 
-/** Rasterise the displaced mesh into the G-buffer. */
-export function rasteriseTerrain(
-  mesh: TerrainMesh,
-  camera: Camera,
-  place: BufferPlacement,
-  target: GBuffer,
-  exaggeration: number,
-) {
-  const { directions, lifts, lonSteps, latSteps, vertexCount } = mesh
-  const { cosLon, sinLon, cosLat, sinLat } = camera
-
-  if (screenX.length < vertexCount) {
-    screenX = new Float32Array(vertexCount)
-    screenY = new Float32Array(vertexCount)
-    screenZ = new Float32Array(vertexCount)
-  }
-
-  // Vertices first, so each is transformed once however many triangles share
-  // it - six, for every interior vertex of the grid.
-  for (let i = 0; i < vertexCount; i++) {
-    const at = i * 3
-    // Displacing here rather than in the mesh is what makes exaggeration a
-    // free parameter: three multiplies on work the transform was doing anyway.
-    const radius = 1 + lifts[i] * exaggeration
-    const x = directions[at] * radius
-    const y = directions[at + 1] * radius
-    const z = directions[at + 2] * radius
-
-    const x1 = x * cosLon - z * sinLon
-    const z1 = x * sinLon + z * cosLon
-    const cy = y * cosLat - z1 * sinLat
-    const cz = y * sinLat + z1 * cosLat
-
-    screenX[i] = x1 * place.scaleX + place.offsetX
-    screenY[i] = place.offsetY - cy * place.scaleY
-    screenZ[i] = cz
-  }
-
-  const cols = lonSteps + 1
-  for (let j = 0; j < latSteps; j++) {
-    const row = j * cols
-    const next = row + cols
-    for (let i = 0; i < lonSteps; i++) {
-      const a = row + i
-      const b = row + i + 1
-      const c = next + i + 1
-      const d = next + i
-      triangle(mesh, target, a, b, c)
-      triangle(mesh, target, a, c, d)
-    }
-  }
-}
-
-/** Rasterise one triangle of the uniform mesh, by vertex index. */
-function triangle(
-  mesh: TerrainMesh,
-  target: GBuffer,
-  ia: number,
-  ib: number,
-  ic: number,
-) {
-  const coords = mesh.coords
-  rasteriseTriangle(
-    target,
-    screenX[ia], screenY[ia], screenZ[ia], coords[ia * 2], coords[ia * 2 + 1],
-    screenX[ib], screenY[ib], screenZ[ib], coords[ib * 2], coords[ib * 2 + 1],
-    screenX[ic], screenY[ic], screenZ[ic], coords[ic * 2], coords[ic * 2 + 1],
-  )
-}
-
 /**
- * Rasterise one triangle with a depth test, from explicit corners.
+ * Rasterise one triangle with a depth test.
  *
  * Coverage comes from the sign of the three edge functions, which is the usual
  * half-plane test; because the projection is affine those same edge functions,
- * normalised, are the barycentric weights, so depth and grid coordinates come
- * out of work already done.
+ * normalised, are the barycentric weights, so depth and surface coordinates
+ * come out of work already done.
  *
- * Takes its corners loose rather than as indices into a mesh, because the
- * quadtree has no fixed vertex array to index into and has to fix up the grid
- * coordinate per triangle at the seam. Screen x and y are in buffer samples,
- * z is camera-space depth in globe radii, and u/v are grid coordinates.
+ * Corners are passed loose rather than as indices into a vertex array: the
+ * quadtree has no fixed one, and it has to adjust the longitude per triangle at
+ * the antimeridian. Screen x and y are in buffer samples, z is camera-space
+ * depth in globe radii, and u/v are the normalised position on the globe.
  */
 export function rasteriseTriangle(
   target: GBuffer,

@@ -5,8 +5,7 @@ import { unproject } from '../globe/projection'
 import { DEMO_SHAPES } from '../globe/demoShapes'
 import { DEMO_ORBITS, DEMO_TIME_SCALE } from '../globe/demoOrbits'
 import { DEMO_LABELS } from '../globe/demoLabels'
-import { assembleGrid, openTerrain } from '../globe/tiles'
-import { buildTerrain, type TerrainMesh } from '../globe/terrain'
+import { openTerrain } from '../globe/tiles'
 import { loadDemoModels } from '../globe/demoModels'
 import type { ModelPlacement } from '../globe/models'
 import './GlobeCanvas.css'
@@ -18,9 +17,6 @@ import './GlobeCanvas.css'
  * levels are deployed are found from there.
  */
 const TERRAIN_BASE = `${import.meta.env.BASE_URL}terrain`
-
-/** The level the fixed lon/lat mesh is built from, when it is asked for. */
-const UNIFORM_LEVEL = 2
 
 const AUTO_ROTATE_SPEED = 0.0035 // radians per frame
 const DRAG_SENSITIVITY = 0.005 // radians per CSS pixel
@@ -37,10 +33,6 @@ export function GlobeCanvas() {
   const viewportRef = useRef<Viewport>({ width: 0, height: 0, dpr: 1 })
   // Latest pointer position in CSS pixels, or null when it is off the canvas.
   const pointerRef = useRef<{ x: number; y: number } | null>(null)
-  // The fixed lon/lat mesh, built only if the uniform mode is asked for. Held
-  // in a ref rather than state: the render loop reads it directly, and swapping
-  // it in should not re-render anything.
-  const terrainRef = useRef<TerrainMesh | null>(null)
   const modelsRef = useRef<readonly ModelPlacement[]>([])
 
   // A few kB each, and entirely optional: the globe draws without them and
@@ -115,21 +107,11 @@ export function GlobeCanvas() {
       const viewport = viewportRef.current
       if (viewport.width > 0) {
         const next = appStore.getState()
-
-        // The fixed mesh wants a whole level at once, which is the thing the
-        // quadtree exists not to need - so it is built only if asked for, and
-        // only once every tile of that level has turned up.
-        if (next.mesh === 'uniform' && !terrainRef.current) {
-          const grid = assembleGrid(UNIFORM_LEVEL)
-          if (grid) terrainRef.current = buildTerrain(grid)
-        }
-
         ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0)
         renderGlobe(ctx, viewport, next, {
           shapes: DEMO_SHAPES,
           orbits: DEMO_ORBITS,
           labels: DEMO_LABELS,
-          terrain: terrainRef.current,
           models: modelsRef.current,
           time: next.elapsed * DEMO_TIME_SCALE,
         })
