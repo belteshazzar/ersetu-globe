@@ -14,7 +14,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "coastlines": "node scripts/build-coastlines.mjs",
-    "elevation": "node scripts/build-elevation.mjs",
+    "terrain": "node --max-old-space-size=6144 scripts/build-terrain.mjs",
     "models": "node scripts/build-models.mjs",
     "preview": "vite preview"
   },

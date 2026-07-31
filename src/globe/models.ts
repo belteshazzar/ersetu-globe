@@ -29,7 +29,7 @@ import {
   isOccluded,
   type Camera,
 } from './projection'
-import { sampleRelief, type ElevationGrid, type Relief } from './elevation'
+import { height as terrainHeight, terrainState } from './tiles'
 import { angleAt, positionAtAngle, type Orbit, type OrbitElements } from './orbits'
 import type { LonLat } from './shapes'
 
@@ -180,7 +180,6 @@ const AMBIENT = 0.3
 
 // Scratch, reused every frame.
 const here: Vec3 = { x: 0, y: 0, z: 0 }
-const relief: Relief = { height: 0, east: 0, north: 0 }
 
 let camX = new Float32Array(0)
 let camY = new Float32Array(0)
@@ -192,7 +191,6 @@ const order: number[] = []
 const byDepth = (a: number, b: number) => faceDepth[a] - faceDepth[b]
 
 export type TerrainContext = {
-  grid: ElevationGrid | null
   exaggeration: number
 }
 
@@ -399,9 +397,16 @@ function resolveAnchor(
   // Stand on the terrain as it is actually displaced, so a model on a mountain
   // rides up with it rather than sinking in.
   let radius = 1 + anchor.altitudeKm / EARTH_RADIUS_KM
-  if (terrain.grid) {
-    sampleRelief(terrain.grid, anchor.longitude, anchor.latitude, relief)
-    radius += (relief.height / (EARTH_RADIUS_KM * 1000)) * terrain.exaggeration
+  const levels = terrainState().levels
+  if (levels > 0) {
+    // The finest level the pyramid holds; sampling falls back to whatever has
+    // actually arrived, so a model never waits on a tile to be placed.
+    const metres = terrainHeight(
+      (anchor.longitude + 180) / 360,
+      (90 - anchor.latitude) / 180,
+      levels - 1,
+    )
+    radius += (metres / (EARTH_RADIUS_KM * 1000)) * terrain.exaggeration
   }
   out.x = anchor.x * radius
   out.y = anchor.y * radius

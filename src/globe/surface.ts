@@ -38,8 +38,7 @@
  * give them shape.
  */
 import type { Camera } from './projection'
-import type { SurfaceStyle } from '../store/appStore'
-import { sampleReliefAt, type ElevationGrid, type Relief } from './elevation'
+import type { MeshMode, SurfaceStyle } from '../store/appStore'
 import {
   getGBuffer,
   placeBuffer,
@@ -47,6 +46,18 @@ import {
   NOT_COVERED,
   type TerrainMesh,
 } from './terrain'
+import { quadtreeStats, rasteriseQuadtree } from './quadtree'
+import { relief as makeRelief, sampleRelief, terrainState, type Relief } from './tiles'
+
+/**
+ * The parts of the app state the surface cares about. Structural, so the store
+ * state can be handed over as it stands without the shading knowing about it.
+ */
+export type SurfaceView = {
+  exaggeration: number
+  surface: SurfaceStyle
+  mesh: MeshMode
+}
 
 export type SurfaceImage = {
   // Explicitly backed by an ArrayBuffer (not SharedArrayBuffer) so the
@@ -176,7 +187,35 @@ const MIN_COS_LAT = 0.02
 let pixelBuffer: Uint8ClampedArray<ArrayBuffer> | null = null
 
 // Scratch, reused every sample.
-const relief: Relief = { height: 0, east: 0, north: 0 }
+const relief: Relief = makeRelief()
+
+/**
+ * Which level of the pyramid to shade from.
+ *
+ * Matched to the buffer rather than to the geometry: shading is per pixel and
+ * reads far finer than the mesh, which is the whole reason the relief keeps its
+ * detail when the triangles are only a few thousand. One buffer sample spans
+ * `stepX / radius` radians of arc at the middle of the disc, and level z
+ * samples every 360/(512 * 2^z) degrees; this is where those meet, rounded up
+ * so the data is never the coarser of the two.
+ */
+function detailLevel(radius: number, stepX: number): number {
+  const wanted = Math.ceil(Math.log2((radius * Math.PI) / (256 * stepX)))
+  const levels = terrainState().levels
+  return Math.max(0, Math.min(levels - 1, wanted))
+}
+
+/** Metres of ground one sample covers at a level, at the equator. */
+function groundAt(level: number): number {
+  return (2 * Math.PI * EARTH_RADIUS_M) / (512 << level)
+}
+
+/** The level the last frame shaded from, for the readout. */
+let lastDetail = 0
+
+export function surfaceDetail(): number {
+  return lastDetail
+}
 
 export type ShadeOptions = {
   /** Shading samples per CSS pixel, before the budget is applied. */
@@ -193,18 +232,23 @@ export function shadeSurface(
   camera: Camera,
   viewport: { width: number; height: number },
   options: ShadeOptions,
-  grid: ElevationGrid | null,
   mesh: TerrainMesh | null,
-  exaggeration: number,
-  style: SurfaceStyle,
+  view: SurfaceView,
 ): SurfaceImage | null {
   const { cx, cy, radius } = camera
+  const { exaggeration, surface: style } = view
+  const terrain = terrainState()
+
+  // The quadtree builds its geometry from the tiles each frame, so it needs
+  // nothing built ahead of time; the uniform mesh has to have arrived.
+  const quadtree = view.mesh === 'quadtree'
+  const displaced = terrain.ready && (quadtree || Boolean(mesh))
 
   // Only shade where the globe and the viewport actually overlap. Displaced
   // terrain stands proud of the sphere, so the box has to allow for however
   // far the tallest ground is currently pushed out.
-  const reach =
-    radius * (grid && mesh ? 1 + mesh.maxLift * exaggeration + 0.002 : 1)
+  const lift = quadtree ? terrain.maxLift : (mesh?.maxLift ?? 0)
+  const reach = radius * (displaced ? 1 + lift * exaggeration + 0.002 : 1)
   const x0 = Math.max(0, Math.floor(cx - reach))
   const y0 = Math.max(0, Math.floor(cy - reach))
   const x1 = Math.min(viewport.width, Math.ceil(cx + reach))
@@ -232,17 +276,32 @@ export function shadeSurface(
 
   const stepX = cssW / width
   const stepY = cssH / height
-  const terrain = Boolean(grid && mesh)
-  const image = { pixels, terrain, width, height, x: x0, y: y0, w: cssW, h: cssH }
+  const image = {
+    pixels,
+    terrain: displaced,
+    width,
+    height,
+    x: x0,
+    y: y0,
+    w: cssW,
+    h: cssH,
+  }
 
-  if (grid && mesh) {
-    shadeTerrain(camera, grid, mesh, image, stepX, stepY, exaggeration, style)
+  if (displaced) {
+    shadeTerrain(camera, mesh, image, stepX, stepY, view)
   } else {
     shadeSphere(camera, image, stepX, stepY, scale, style)
   }
 
   return image
 }
+
+/** Triangles the last frame's geometry cost, whichever mesh drew it. */
+export function surfaceTriangles(): number {
+  return lastTriangles
+}
+
+let lastTriangles = 0
 
 /** The key light, carried into world space. Terrain slopes live there. */
 function worldLight(camera: Camera) {
@@ -320,25 +379,31 @@ function shadeSphere(
  */
 function shadeTerrain(
   camera: Camera,
-  grid: ElevationGrid,
-  mesh: TerrainMesh,
+  mesh: TerrainMesh | null,
   image: SurfaceImage,
   stepX: number,
   stepY: number,
-  exaggeration: number,
-  style: SurfaceStyle,
+  view: SurfaceView,
 ) {
   const { cx, cy, radius, cosLon, sinLon, cosLat, sinLat } = camera
   const { pixels, width, height, x: x0, y: y0 } = image
-  const solid = style === 'flat'
+  const { exaggeration } = view
+  const solid = view.surface === 'flat'
 
   const place = placeBuffer(camera, x0, y0, stepX, stepY)
   const gbuffer = getGBuffer(width, height)
-  rasteriseTerrain(mesh, camera, place, gbuffer, exaggeration)
+  const detail = detailLevel(radius, stepX)
+  if (view.mesh === 'quadtree' || !mesh) {
+    rasteriseQuadtree(camera, place, gbuffer, exaggeration, detail)
+    lastTriangles = quadtreeStats().triangles
+  } else {
+    rasteriseTerrain(mesh, camera, place, gbuffer, exaggeration)
+    lastTriangles = mesh.lonSteps * mesh.latSteps * 2
+  }
+  lastDetail = detail
 
   const light = worldLight(camera)
-  const invCellNorth = grid.height / (Math.PI * EARTH_RADIUS_M)
-  const invCellEast = grid.width / (2 * Math.PI * EARTH_RADIUS_M)
+  const groundPerSample = groundAt(detail)
   const { u: uBuf, v: vBuf, depth } = gbuffer
 
   for (let by = 0; by < height; by++) {
@@ -376,10 +441,12 @@ function shadeTerrain(
       const cosPhi = horizontal > MIN_COS_LAT ? horizontal : MIN_COS_LAT
       const invCos = 1 / cosPhi
 
-      sampleReliefAt(grid, uBuf[sample], vBuf[sample], relief)
+      // The tiles answer in true slope - rise per metre of ground - because
+      // which level answered is not known here and would change the units.
+      sampleRelief(uBuf[sample], vBuf[sample], detail, relief)
 
-      const se = SHADE_EXAGGERATION * relief.east * invCellEast * invCos
-      const sn = SHADE_EXAGGERATION * relief.north * invCellNorth
+      const se = SHADE_EXAGGERATION * relief.east
+      const sn = SHADE_EXAGGERATION * relief.north
 
       // east is (wz, 0, -wx)/cos, north is (-wy*wx, cos^2, -wy*wz)/cos.
       const eastDotL = (wz * light.x - wx * light.z) * invCos
@@ -398,10 +465,12 @@ function shadeTerrain(
       // of sea colour around every continent, worst at the limb, where the
       // displacement is entirely sideways.
       //
-      // The crossing is softened over about a grid cell either side, measured
-      // by how fast the height is changing: a steep coast gets a hard edge, a
-      // shallow one a wider blend, and both stay smooth under magnification.
-      const slope = Math.abs(relief.east) + Math.abs(relief.north) + 1
+      // The crossing is softened by how fast the height is changing: a steep
+      // coast gets a hard edge, a shallow one a wider blend, and both stay
+      // smooth under magnification. The slopes are per metre of ground now, so
+      // the reference length that turns them back into a height is the ground
+      // one sample covers at whichever level answered.
+      const slope = (Math.abs(relief.east) + Math.abs(relief.north)) * groundPerSample + 1
       let landness = 0.5 + elevation / slope
       if (landness < 0) landness = 0
       else if (landness > 1) landness = 1

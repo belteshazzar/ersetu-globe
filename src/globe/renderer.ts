@@ -1,4 +1,4 @@
-import type { AppState } from '../store/appStore'
+import { actions, type AppState } from '../store/appStore'
 import { COASTLINE_POLYGONS, COASTLINE_RINGS } from './data/coastlines'
 import {
   buildGraticule,
@@ -9,9 +9,15 @@ import {
   strokeMesh,
   type Camera,
 } from './projection'
-import { shadeSurface, FLAT_LAND_CSS, type SurfaceImage } from './surface'
-import type { ElevationGrid } from './elevation'
+import {
+  shadeSurface,
+  surfaceDetail,
+  surfaceTriangles,
+  FLAT_LAND_CSS,
+  type SurfaceImage,
+} from './surface'
 import type { TerrainMesh } from './terrain'
+import { pump, tick as tickTerrain } from './tiles'
 import type { Shape } from './shapes'
 import { drawOrbits, type Orbit } from './orbits'
 import { drawLabels, type Label } from './labels'
@@ -29,13 +35,12 @@ export type Scene = {
    */
   labels?: readonly Label[]
   /**
-   * Relief for the globe itself, rather than an overlay on it. Optional and
-   * loaded asynchronously: until it arrives the globe is a smooth sphere with
-   * its land taken from the coastline geometry instead. `terrain` is the
-   * displaced mesh built from `elevation`; both are needed before the globe
-   * takes on any shape.
+   * The fixed lon/lat mesh, for the `uniform` mesh mode only.
+   *
+   * The quadtree needs nothing here: it reads the tile store directly and
+   * builds its geometry per frame. Until the first tiles land the globe is a
+   * smooth sphere with its land taken from the coastline geometry instead.
    */
-  elevation?: ElevationGrid | null
   terrain?: TerrainMesh | null
   /**
    * Small 3D models standing on the surface or flying above it. Loaded
@@ -104,15 +109,15 @@ export function renderGlobe(
   const camera = globeCamera(viewport, state)
   const { cx, cy, radius } = camera
 
-  const surface = shadeSurface(
-    camera,
-    viewport,
-    SHADE,
-    scene.elevation ?? null,
-    scene.terrain ?? null,
-    state.exaggeration,
-    state.surface,
-  )
+  tickTerrain()
+  const surface = shadeSurface(camera, viewport, SHADE, scene.terrain ?? null, state)
+  // Selection has now had its say about which tiles this view wants, so the
+  // fetches go out here - after the frame, in the order it decided.
+  pump()
+  if (surface?.terrain) {
+    actions.setMeshTriangles(surfaceTriangles())
+    actions.setDetail(surfaceDetail())
+  }
   if (surface) blit(ctx, surface, surface.pixels)
 
   // Displaced terrain already knows which of its samples are land, from the
@@ -176,7 +181,6 @@ export function renderGlobe(
   // before the labels, which name them.
   if (scene.models?.length) {
     drawModels(ctx, camera, scene.models, scene.time ?? 0, {
-      grid: scene.elevation ?? null,
       exaggeration: state.exaggeration,
     })
   }

@@ -3,6 +3,15 @@ import { createStore } from './createStore'
 
 export type SurfaceStyle = 'metal' | 'flat'
 
+/**
+ * Where the globe's geometry comes from.
+ *
+ * `uniform` is the fixed lon/lat mesh built once from the elevation; `quadtree`
+ * refines an octahedron per frame against the camera, so detail follows the
+ * zoom instead of being decided when the data landed.
+ */
+export type MeshMode = 'uniform' | 'quadtree'
+
 /** Camera/orientation state for the globe, plus general app state. */
 export type AppState = {
   /** Rotation about the polar axis, radians. */
@@ -19,6 +28,18 @@ export type AppState = {
    * left to the lighting to give them shape.
    */
   surface: SurfaceStyle
+  /** Where the globe's geometry comes from. */
+  mesh: MeshMode
+  /**
+   * Triangles the last frame's geometry cost, rounded to the nearest hundred.
+   *
+   * Rounded in the action rather than the readout so that the HUD re-renders
+   * when the figure visibly changes rather than on every frame, which is what
+   * it would do if the exact count were held here.
+   */
+  meshTriangles: number
+  /** Which level of the terrain pyramid the last frame shaded from. */
+  detail: number
   /**
    * How far the terrain is displaced, as a multiple of true height.
    *
@@ -50,6 +71,9 @@ const initialState: AppState = {
   zoom: 1,
   autoRotate: true,
   surface: 'flat',
+  mesh: 'quadtree',
+  meshTriangles: 0,
+  detail: 0,
   exaggeration: 30,
   frame: 0,
   elapsed: 0,
@@ -91,6 +115,23 @@ export const actions = {
   },
   setSurface(surface: SurfaceStyle) {
     appStore.setState({ surface })
+  },
+  setMesh(mesh: MeshMode) {
+    appStore.setState({ mesh })
+  },
+  /**
+   * Report what the last frame's geometry cost. Called from the render loop, so
+   * it rounds hard: an exact count would differ every frame and drag the HUD
+   * through a re-render with it.
+   */
+  setMeshTriangles(triangles: number) {
+    const rounded = Math.round(triangles / 100) * 100
+    if (rounded !== appStore.getState().meshTriangles) {
+      appStore.setState({ meshTriangles: rounded })
+    }
+  },
+  setDetail(detail: number) {
+    if (detail !== appStore.getState().detail) appStore.setState({ detail })
   },
   setExaggeration(exaggeration: number) {
     appStore.setState({ exaggeration: clamp(exaggeration, 0, MAX_EXAGGERATION) })

@@ -5,12 +5,21 @@ import { unproject } from '../globe/projection'
 import { DEMO_SHAPES } from '../globe/demoShapes'
 import { DEMO_ORBITS, DEMO_TIME_SCALE } from '../globe/demoOrbits'
 import { DEMO_LABELS } from '../globe/demoLabels'
-import { loadElevation, type ElevationGrid } from '../globe/elevation'
+import { assembleGrid, openTerrain } from '../globe/tiles'
 import { buildTerrain, type TerrainMesh } from '../globe/terrain'
 import { loadDemoModels } from '../globe/demoModels'
 import type { ModelPlacement } from '../globe/models'
-import elevationUrl from '../globe/data/elevation.bin?url'
 import './GlobeCanvas.css'
+
+/**
+ * The tiled terrain archive, served as a static file and read by byte range.
+ * Kept out of the bundle deliberately: it is data, and the point of tiling it
+ * is that almost none of it is fetched.
+ */
+const TERRAIN_URL = `${import.meta.env.BASE_URL}terrain.bin`
+
+/** The level the fixed lon/lat mesh is built from, when it is asked for. */
+const UNIFORM_LEVEL = 2
 
 const AUTO_ROTATE_SPEED = 0.0035 // radians per frame
 const DRAG_SENSITIVITY = 0.005 // radians per CSS pixel
@@ -27,10 +36,9 @@ export function GlobeCanvas() {
   const viewportRef = useRef<Viewport>({ width: 0, height: 0, dpr: 1 })
   // Latest pointer position in CSS pixels, or null when it is off the canvas.
   const pointerRef = useRef<{ x: number; y: number } | null>(null)
-  // Relief for the globe, once it has arrived. Held in a ref rather than
-  // state: the render loop reads it directly, and swapping it in should not
-  // re-render anything.
-  const elevationRef = useRef<ElevationGrid | null>(null)
+  // The fixed lon/lat mesh, built only if the uniform mode is asked for. Held
+  // in a ref rather than state: the render loop reads it directly, and swapping
+  // it in should not re-render anything.
   const terrainRef = useRef<TerrainMesh | null>(null)
   const modelsRef = useRef<readonly ModelPlacement[]>([])
 
@@ -50,24 +58,14 @@ export function GlobeCanvas() {
     }
   }, [])
 
-  // A couple of megabytes that the first frames do not wait for. Until it
-  // lands the globe is a smooth sphere, which is what it looked like before.
+  // The index and the eight tiles of level 0 - about 230 kB, and the whole
+  // world. Everything finer is fetched per view as the camera asks for it.
+  // Until this lands the globe is a smooth sphere, which is what it looked like
+  // before there was any relief at all.
   useEffect(() => {
-    let cancelled = false
-    loadElevation(elevationUrl)
-      .then((grid) => {
-        if (cancelled) return
-        // Displacing the mesh is a one-off: the shape is fixed in the globe's
-        // own frame, and only the camera moves after this.
-        terrainRef.current = buildTerrain(grid)
-        elevationRef.current = grid
-      })
-      .catch((error: unknown) => {
-        console.warn('Elevation data unavailable; shading the globe flat.', error)
-      })
-    return () => {
-      cancelled = true
-    }
+    openTerrain(TERRAIN_URL).catch((error: unknown) => {
+      console.warn('Terrain unavailable; shading the globe flat.', error)
+    })
   }, [])
 
   // Keep the backing store sized to the element and the display density.
@@ -116,12 +114,20 @@ export function GlobeCanvas() {
       const viewport = viewportRef.current
       if (viewport.width > 0) {
         const next = appStore.getState()
+
+        // The fixed mesh wants a whole level at once, which is the thing the
+        // quadtree exists not to need - so it is built only if asked for, and
+        // only once every tile of that level has turned up.
+        if (next.mesh === 'uniform' && !terrainRef.current) {
+          const grid = assembleGrid(UNIFORM_LEVEL)
+          if (grid) terrainRef.current = buildTerrain(grid)
+        }
+
         ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0)
         renderGlobe(ctx, viewport, next, {
           shapes: DEMO_SHAPES,
           orbits: DEMO_ORBITS,
           labels: DEMO_LABELS,
-          elevation: elevationRef.current,
           terrain: terrainRef.current,
           models: modelsRef.current,
           time: next.elapsed * DEMO_TIME_SCALE,

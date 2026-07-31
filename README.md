@@ -25,7 +25,7 @@ npm run dev
 | `npm run build` | type-check and build |
 | `npm run lint` | lint |
 | `npm run coastlines [110m\|50m]` | regenerate the coastline data |
-| `npm run elevation [width]` | regenerate the elevation grid (downloads 466 MB) |
+| `npm run terrain [--levels N] [--source FILE]` | regenerate the terrain tiles (downloads 466 MB) |
 | `npm run models` | regenerate the sample 3D models |
 
 ## How it works
@@ -54,8 +54,8 @@ multiplies through it.
 
 ### Relief
 
-`src/globe/terrain.ts`, `src/globe/elevation.ts`, and the terrain half of
-`src/globe/surface.ts`.
+`src/globe/quadtree.ts`, `src/globe/tiles.ts`, `src/globe/terrain.ts`, and the
+terrain half of `src/globe/surface.ts`.
 
 The globe is not a sphere. Every vertex of a lon/lat mesh is pushed out to
 `1 + k·h`, so mountains genuinely stand off the surface, basins genuinely sink
@@ -290,8 +290,6 @@ renderGlobe(ctx, viewport, state, {
   orbits: [iss],
   labels: [london, relay, tag],
   models: [station, tower],
-  elevation,
-  terrain,
   time: elapsedSeconds * 400,
 })
 ```
@@ -321,22 +319,45 @@ use except navigation. ETOPO is the useful source because it is seamless —
 topography and bathymetry come from one grid, so there is no coastline seam to
 reconcile between two datasets.
 
-`npm run elevation [width]` builds it. The published 60 arc-second GeoTIFF is
-466 MB of Deflate-compressed 32-bit float in 256×256 tiles; the script streams
-it, undoes the floating-point predictor, box-averages down to 2048×1024 and
-writes 16-bit metres. Averaging rather than sampling matters — keeping one
-15 arc-second cell out of every block would hold whichever peak or trench it
-landed on and drop the rest, which reads as speckle once it lights a surface.
+`npm run terrain` builds it. The published 60 arc-second GeoTIFF is 466 MB of
+Deflate-compressed 32-bit float in 256×256 tiles; the script streams it, undoes
+the floating-point predictor and box-averages down. Averaging rather than
+sampling matters — keeping one 15 arc-second cell out of every block would hold
+whichever peak or trench it landed on and drop the rest, which reads as speckle
+once it lights a surface.
 
-That grid is committed as `src/globe/data/elevation.bin`: 2.6 MB, stored as
-differences from the neighbouring sample and Deflate-compressed, which is
-roughly what a PNG would do. It is read back through `DecompressionStream`
-rather than as an image, because drawing a 16-bit PNG to a canvas is the one
-thing guaranteed to throw the low byte away. It is fetched once on load and the
-globe renders as smooth metal until it lands, so nothing waits for it.
+The result is a pyramid, not one grid, cut into 128-sample tiles and packed into
+`public/terrain.bin`. It is rooted to match the geometry: level 0 is four tiles
+around by two down, which is exactly the eight lon/lat boxes of the octahedron
+the quadtree starts from, and each level doubles.
 
-Both datasets ship with the app. Nothing else is fetched at runtime — no tiles,
-no APIs.
+| level | grid | deg/sample | ground | size |
+| --- | --- | --- | --- | --- |
+| 0 | 512×256 | 0.703 | 78 km | 191 kB |
+| 1 | 1024×512 | 0.352 | 39 km | 729 kB |
+| 2 | 2048×1024 | 0.176 | 20 km | 2.68 MB |
+| 3 | 4096×2048 | 0.088 | 10 km | 10.0 MB |
+| 4 | 8192×4096 | 0.044 | 4.9 km | 36.5 MB |
+
+Levels 0–2 ship, at 3.6 MB. `npm run terrain -- --levels 4` builds the rest,
+which is worth hosting rather than committing.
+
+Tiles carry a one-sample border, so bilinear sampling and the slope taps at the
+very edge of a tile need nothing but that tile. Each is compressed on its own —
+which gives up some ratio, but is what makes a tile independently fetchable and
+decodable without its neighbours or its parent.
+
+The client reads the index once and then asks for byte ranges, which every
+static host already does, with no server logic anywhere. If a host does not
+honour Range it says so by sending the whole file, and the client notices and
+serves every tile from memory instead. That is the difference between 234 kB and
+3.6 MB before the globe has any shape: level 0 draws the whole world, and
+everything after it is detail fetched for the part being looked at. A session
+that zooms into two continents transfers about 9% of the archive.
+
+Sampling always succeeds. Asking for a level that has not arrived walks up the
+pyramid to the finest ancestor that has, so the picture is never missing, only
+coarser than it will shortly be.
 
 ## Licence
 

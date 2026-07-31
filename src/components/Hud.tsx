@@ -15,6 +15,9 @@ export function Hud() {
   const autoRotate = useAppStore((s) => s.autoRotate)
   const exaggeration = useAppStore((s) => s.exaggeration)
   const surface = useAppStore((s) => s.surface)
+  const mesh = useAppStore((s) => s.mesh)
+  const triangles = useAppStore((s) => s.meshTriangles)
+  const detail = useAppStore((s) => s.detail)
 
   // Rounded inside the selector, so spinning the globe only re-renders when
   // the displayed figure actually changes.
@@ -60,6 +63,36 @@ export function Hud() {
       </div>
 
       <div className="hud__field">
+        <span className="hud__field-label">mesh</span>
+        <span className="hud__toggle">
+          <button
+            type="button"
+            aria-pressed={mesh === 'uniform'}
+            onClick={() => actions.setMesh('uniform')}
+          >
+            uniform
+          </button>
+          <button
+            type="button"
+            aria-pressed={mesh === 'quadtree'}
+            onClick={() => actions.setMesh('quadtree')}
+          >
+            quadtree
+          </button>
+        </span>
+      </div>
+      <div className="hud__field">
+        <span className="hud__field-label">triangles</span>
+        <span className="hud__field-value">{formatCount(triangles)}</span>
+      </div>
+      <div className="hud__field">
+        <span className="hud__field-label">detail</span>
+        <span className="hud__field-value">
+          L{detail} &middot; {formatSpacing(detail)}
+        </span>
+      </div>
+
+      <div className="hud__field">
         <label className="hud__field-label" htmlFor="relief">
           relief
         </label>
@@ -89,6 +122,17 @@ export function Hud() {
       <p className="hud__hint">Drag to rotate &middot; scroll to zoom</p>
     </div>
   )
+}
+
+/** Thousands separated, so a six-figure mesh reads at a glance. */
+function formatCount(value: number) {
+  return value.toLocaleString('en-US')
+}
+
+/** Ground covered by one sample of a pyramid level, at the equator. */
+function formatSpacing(level: number) {
+  const km = 40_075 / (512 * 2 ** level)
+  return km >= 10 ? `${Math.round(km)} km` : `${km.toFixed(1)} km`
 }
 
 function round1(value: number | null) {

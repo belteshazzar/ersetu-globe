@@ -26,7 +26,7 @@
  * mesh before rasterising.
  */
 import type { Camera } from './projection'
-import type { ElevationGrid } from './elevation'
+import type { ElevationGrid } from './tiles'
 
 const EARTH_RADIUS_M = 6_371_000
 
@@ -59,7 +59,16 @@ export type TerrainMesh = {
   lifts: Float32Array
   /** The largest outward lift, for sizing the area that needs shading. */
   maxLift: number
-  /** Where each vertex sits on the elevation grid, uv per vertex. */
+  /**
+   * Where each vertex sits on the globe, uv per vertex: longitude eastward
+   * from the antimeridian and latitude southward from the north pole, both as
+   * fractions of the whole.
+   *
+   * Normalised rather than in grid cells because the shading pass no longer
+   * reads one fixed grid - it reads whichever level of the tile pyramid has
+   * arrived - and these are interpolated across a triangle by a rasteriser
+   * that has no business knowing which that will be.
+   */
   coords: Float32Array
 }
 
@@ -88,13 +97,13 @@ export function buildTerrain(
 
   for (let j = 0; j < rows; j++) {
     // Rows run north to south, matching the grid.
-    const v = (j / latSteps) * grid.height - 0.5
+    const v = j / latSteps
     const latitude = (Math.PI / 2) * (1 - (2 * j) / latSteps)
     const cosLat = Math.cos(latitude)
     const sinLat = Math.sin(latitude)
 
     for (let i = 0; i < cols; i++) {
-      const u = (i / lonSteps) * grid.width - 0.5
+      const u = i / lonSteps
       const longitude = (2 * Math.PI * i) / lonSteps - Math.PI
 
       const vertex = j * cols + i
@@ -103,7 +112,8 @@ export function buildTerrain(
       directions[at + 1] = sinLat
       directions[at + 2] = cosLat * Math.cos(longitude)
 
-      const lift = sampleHeight(grid, u, v) / EARTH_RADIUS_M
+      const lift =
+        sampleHeight(grid, u * grid.width - 0.5, v * grid.height - 0.5) / EARTH_RADIUS_M
       lifts[vertex] = lift
       if (lift > maxLift) maxLift = lift
 
@@ -123,7 +133,7 @@ export function buildTerrain(
  * and wants only the height, not the slope, and it must not let the poles fold
  * over onto the far side of the globe.
  */
-function sampleHeight(grid: ElevationGrid, fx: number, fy: number): number {
+export function sampleHeight(grid: ElevationGrid, fx: number, fy: number): number {
   const { width, height, data } = grid
 
   let x0 = Math.floor(fx)
@@ -278,14 +288,7 @@ export function rasteriseTerrain(
   }
 }
 
-/**
- * Rasterise one triangle with a depth test.
- *
- * Coverage comes from the sign of the three edge functions, which is the usual
- * half-plane test; because the projection is affine those same edge functions,
- * normalised, are the barycentric weights, so depth and grid coordinates come
- * out of work already done.
- */
+/** Rasterise one triangle of the uniform mesh, by vertex index. */
 function triangle(
   mesh: TerrainMesh,
   target: GBuffer,
@@ -293,13 +296,34 @@ function triangle(
   ib: number,
   ic: number,
 ) {
-  const ax = screenX[ia]
-  const ay = screenY[ia]
-  const bx = screenX[ib]
-  const by = screenY[ib]
-  const cx = screenX[ic]
-  const cy = screenY[ic]
+  const coords = mesh.coords
+  rasteriseTriangle(
+    target,
+    screenX[ia], screenY[ia], screenZ[ia], coords[ia * 2], coords[ia * 2 + 1],
+    screenX[ib], screenY[ib], screenZ[ib], coords[ib * 2], coords[ib * 2 + 1],
+    screenX[ic], screenY[ic], screenZ[ic], coords[ic * 2], coords[ic * 2 + 1],
+  )
+}
 
+/**
+ * Rasterise one triangle with a depth test, from explicit corners.
+ *
+ * Coverage comes from the sign of the three edge functions, which is the usual
+ * half-plane test; because the projection is affine those same edge functions,
+ * normalised, are the barycentric weights, so depth and grid coordinates come
+ * out of work already done.
+ *
+ * Takes its corners loose rather than as indices into a mesh, because the
+ * quadtree has no fixed vertex array to index into and has to fix up the grid
+ * coordinate per triangle at the seam. Screen x and y are in buffer samples,
+ * z is camera-space depth in globe radii, and u/v are grid coordinates.
+ */
+export function rasteriseTriangle(
+  target: GBuffer,
+  ax: number, ay: number, az: number, au: number, av: number,
+  bx: number, by: number, bz: number, bu: number, bv: number,
+  cx: number, cy: number, cz: number, cu: number, cv: number,
+) {
   // Signed area: negative is back-facing, zero is degenerate - which is what
   // every triangle collapsed onto a pole becomes.
   const area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
@@ -317,18 +341,6 @@ function triangle(
   if (maxX > width - 1) maxX = width - 1
   if (maxY > height - 1) maxY = height - 1
   if (minX > maxX || minY > maxY) return
-
-  const az = screenZ[ia]
-  const bz = screenZ[ib]
-  const cz = screenZ[ic]
-
-  const coords = mesh.coords
-  const au = coords[ia * 2]
-  const av = coords[ia * 2 + 1]
-  const bu = coords[ib * 2]
-  const bv = coords[ib * 2 + 1]
-  const cu = coords[ic * 2]
-  const cv = coords[ic * 2 + 1]
 
   const inv = 1 / area
 
