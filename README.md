@@ -26,6 +26,7 @@ npm run dev
 | `npm run lint` | lint |
 | `npm run coastlines [110m\|50m]` | regenerate the coastline data |
 | `npm run elevation [width]` | regenerate the elevation grid (downloads 466 MB) |
+| `npm run models` | regenerate the sample 3D models |
 
 ## How it works
 
@@ -240,6 +241,47 @@ Style options: `color`, `size`, `weight`, `family`, `font`, `placement`
 (`right` | `left` | `above` | `below` | `centre`), `gap`, `offset`, `dot`,
 `leader`, `halo`, `haloWidth`, `stem`, `fade`, `declutter`.
 
+### 3D models
+
+`src/globe/models.ts`. Small models standing on the ground or flying above it,
+fetched at runtime rather than bundled — the globe draws long before any of
+them arrive and simply gains them when they do.
+
+```ts
+import { loadModel, placeOnSurface, placeInOrbit } from './globe/models'
+
+const station = await loadModel(stationUrl)
+
+const scene = [
+  placeInOrbit(station, iss, { size: 0.07, spin: 8 }),
+  placeOnSurface(tower, [-74.01, 40.71], { size: 0.05, heading: 30 }),
+]
+```
+
+Also `placeTracking`, for anything else that moves. A surface model rides the
+*displaced* terrain, so it rises and falls with the relief slider instead of
+sinking into a mountain.
+
+Models are drawn as ordinary canvas paths at full resolution rather than
+through the terrain's sample buffer — at the size one of these occupies, those
+samples are far too coarse to carry a shape. That means no depth buffer, so
+depth is handled twice over: within a model, faces are sorted back to front,
+which is sound for these box-and-cylinder assemblies; against the globe, the
+anchor is tested for occlusion as a whole, by the same rule the orbits use.
+Faces are lit from both sides with the normal turned towards the camera, so the
+renderer does not care which way a model's triangles wind.
+
+Nothing is to scale. A real car is a ten-millionth of the Earth's radius and
+would never reach a pixel, so `size` is in globe radii and chosen to be seen —
+exactly as the terrain is exaggerated to be seen. One consequence of an
+orthographic projection is worth knowing: whatever sits in the middle of the
+disc is seen from directly overhead, so a tower there shows you its roof. Move
+it towards the limb and it stands up.
+
+The samples — a satellite, a space station, a tower and a car — are built from
+boxes and cylinders by `scripts/build-models.mjs` into a small JSON format:
+`positions`, `faces` as triangle indices, and one rgb triple per face.
+
 ### Drawing a scene
 
 ```ts
@@ -247,6 +289,9 @@ renderGlobe(ctx, viewport, state, {
   shapes: [routes, rings],
   orbits: [iss],
   labels: [london, relay, tag],
+  models: [station, tower],
+  elevation,
+  terrain,
   time: elapsedSeconds * 400,
 })
 ```

@@ -15,6 +15,7 @@
     "lint": "oxlint",
     "coastlines": "node scripts/build-coastlines.mjs",
     "elevation": "node scripts/build-elevation.mjs",
+    "models": "node scripts/build-models.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

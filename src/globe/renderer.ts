@@ -15,6 +15,7 @@ import type { TerrainMesh } from './terrain'
 import type { Shape } from './shapes'
 import { drawOrbits, type Orbit } from './orbits'
 import { drawLabels, type Label } from './labels'
+import { drawModels, type ModelPlacement } from './models'
 
 /** Everything drawn on top of the globe itself. */
 export type Scene = {
@@ -36,6 +37,11 @@ export type Scene = {
    */
   elevation?: ElevationGrid | null
   terrain?: TerrainMesh | null
+  /**
+   * Small 3D models standing on the surface or flying above it. Loaded
+   * asynchronously, so this is simply empty until they arrive.
+   */
+  models?: readonly ModelPlacement[]
   /**
    * The clock driving satellite motion, in the same units as each orbit's
    * period. Scale it however fast you want the animation to run.
@@ -164,6 +170,15 @@ export function renderGlobe(
   // rather than the horizon test, and remain visible past its edge.
   if (scene.orbits?.length) {
     drawOrbits(ctx, camera, scene.orbits, scene.time ?? 0)
+  }
+
+  // Models after the orbits, so a satellite's own path passes behind it, but
+  // before the labels, which name them.
+  if (scene.models?.length) {
+    drawModels(ctx, camera, scene.models, scene.time ?? 0, {
+      grid: scene.elevation ?? null,
+      exaggeration: state.exaggeration,
+    })
   }
 
   // Text on top of everything: it is the one layer that cannot be read through

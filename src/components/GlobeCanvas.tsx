@@ -7,6 +7,8 @@ import { DEMO_ORBITS, DEMO_TIME_SCALE } from '../globe/demoOrbits'
 import { DEMO_LABELS } from '../globe/demoLabels'
 import { loadElevation, type ElevationGrid } from '../globe/elevation'
 import { buildTerrain, type TerrainMesh } from '../globe/terrain'
+import { loadDemoModels } from '../globe/demoModels'
+import type { ModelPlacement } from '../globe/models'
 import elevationUrl from '../globe/data/elevation.bin?url'
 import './GlobeCanvas.css'
 
@@ -30,6 +32,23 @@ export function GlobeCanvas() {
   // re-render anything.
   const elevationRef = useRef<ElevationGrid | null>(null)
   const terrainRef = useRef<TerrainMesh | null>(null)
+  const modelsRef = useRef<readonly ModelPlacement[]>([])
+
+  // A few kB each, and entirely optional: the globe draws without them and
+  // gains them when they land.
+  useEffect(() => {
+    let cancelled = false
+    loadDemoModels()
+      .then((models) => {
+        if (!cancelled) modelsRef.current = models
+      })
+      .catch((error: unknown) => {
+        console.warn('Models unavailable; drawing the globe without them.', error)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // A couple of megabytes that the first frames do not wait for. Until it
   // lands the globe is a smooth sphere, which is what it looked like before.
@@ -104,6 +123,7 @@ export function GlobeCanvas() {
           labels: DEMO_LABELS,
           elevation: elevationRef.current,
           terrain: terrainRef.current,
+          models: modelsRef.current,
           time: next.elapsed * DEMO_TIME_SCALE,
         })
 
