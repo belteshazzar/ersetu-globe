@@ -30,6 +30,8 @@
  */
 
 const MAGIC = 'ERSETILE'
+/** 2 is one file per level; 1 was the whole pyramid in one. */
+const VERSION = 2
 const HEADER_BYTES = 32
 const INDEX_ENTRY_BYTES = 16
 
@@ -89,27 +91,41 @@ export type Terrain = {
 // --- Archive --------------------------------------------------------------
 
 /**
- * The index, as parallel typed arrays rather than objects: it is walked per
- * frame to decide what to ask for, and there is one entry per tile in the
- * whole pyramid.
+ * One level's file, once its index has been read.
+ *
+ * The index is parallel typed arrays rather than objects: it is walked per
+ * frame to decide what to ask for, and there is an entry per tile of the level.
+ * Offsets are within this file, so a coalesced run never spans two of them.
  */
-type Archive = {
+type LevelFile = {
   url: string
-  levels: number
-  tileSize: number
-  border: number
-  stored: number
   dataOffset: number
   /** Byte offset of each tile's payload, relative to `dataOffset`. */
   offsets: Uint32Array
   lengths: Uint32Array
   /** Metres by which each tile departs from what its parent already said. */
   errors: Uint16Array
-  highest: Int16Array
-  /** Index of the first tile of each level. */
-  levelBase: Uint32Array
-  /** The whole file, if the host would not do ranges. */
+  /** The whole file, when it was fetched whole rather than by range. */
   whole: Uint8Array | null
+}
+
+/**
+ * How far each level has got. A level that 404s is `missing` for good: the
+ * deeper files are optional, and sampling simply falls back to what is there.
+ */
+type LevelStatus = 'absent' | 'opening' | 'ready' | 'missing'
+
+type Archive = {
+  /** Files are `<base>-<level>.bin`. */
+  base: string
+  levels: number
+  tileSize: number
+  border: number
+  stored: number
+  files: (LevelFile | null)[]
+  status: LevelStatus[]
+  /** Index of the first tile of each level, in the global numbering. */
+  levelBase: Uint32Array
 }
 
 let archive: Archive | null = null
@@ -142,84 +158,153 @@ export function terrainState(): Terrain {
  * Resolves once level 0 is in, which is the point the globe can be drawn at
  * all. Everything finer arrives later and on demand.
  */
-export async function openTerrain(url: string): Promise<void> {
-  // One request covers the header and the index for any sane pyramid: five
-  // levels is 2728 tiles, which is 43 kB of index.
-  const head = await fetchRange(url, 0, 65535)
-  const view = new DataView(head.body.buffer, head.body.byteOffset, head.body.byteLength)
+export async function openTerrain(base: string): Promise<void> {
+  // Level 0 comes whole, in one plain GET. It is 191 kB, it is the entire
+  // world, and nothing can be drawn without it - so there is no sense paying a
+  // round trip for the index and another for the tiles, and a 200 is cached by
+  // everything without special handling.
+  const response = await fetch(`${base}-0.bin`)
+  if (!response.ok) throw new Error(`Terrain fetch failed: HTTP ${response.status}`)
+  const body = new Uint8Array(await response.arrayBuffer())
+  bytesFetched += body.byteLength
 
+  const head = readHeader(body)
+  if (head.level !== 0) throw new Error(`Expected level 0, got level ${head.level}`)
+
+  const levelBase = new Uint32Array(head.levels + 1)
+  let at = 0
+  for (let z = 0; z < head.levels; z++) {
+    levelBase[z] = at
+    at += tilesAcross(z) * tilesDown(z)
+  }
+  levelBase[head.levels] = at
+
+  archive = {
+    base,
+    levels: head.levels,
+    tileSize: head.tileSize,
+    border: head.border,
+    stored: head.tileSize + 2 * head.border,
+    files: new Array(head.levels).fill(null),
+    status: new Array(head.levels).fill('absent'),
+    levelBase,
+  }
+  archive.files[0] = readIndex(`${base}-0.bin`, body, head, body)
+  archive.status[0] = 'ready'
+
+  state.levels = head.levels
+  state.tileSize = head.tileSize
+  // Taken from the finest level at build time, so a client holding only level 0
+  // still knows how far terrain can stand off the sphere. Level 0's own maxima
+  // are averaged down and would size the shaded region short, which saws the
+  // tops off mountains at the limb.
+  state.maxLift = head.peak / EARTH_RADIUS_M
+  // Stamps start at zero, so the clock must not; otherwise the first frame
+  // reads every tile as already asked for.
+  asked = new Uint32Array(at)
+  clock = 1
+
+  // Decode level 0's eight tiles up front; the globe cannot draw without them.
+  const file = archive.files[0]!
+  await Promise.all(
+    Array.from({ length: tilesAcross(0) * tilesDown(0) }, (_, i) =>
+      decode(
+        file.whole!.subarray(
+          file.dataOffset + file.offsets[i],
+          file.dataOffset + file.offsets[i] + file.lengths[i],
+        ),
+        archive!.stored,
+      ).then((samples) => tiles.set(i, { samples, used: 1 })),
+    ),
+  )
+  state.ready = true
+}
+
+type Header = {
+  tileSize: number
+  border: number
+  levels: number
+  level: number
+  indexBytes: number
+  dataOffset: number
+  tileCount: number
+  peak: number
+}
+
+function readHeader(bytes: Uint8Array): Header {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   let magic = ''
   for (let i = 0; i < 8; i++) magic += String.fromCharCode(view.getUint8(i))
-  if (magic !== MAGIC) throw new Error('Terrain archive has the wrong magic')
-
-  const tileSize = view.getUint16(10, true)
-  const border = view.getUint8(12)
-  const levels = view.getUint8(13)
-  const indexBytes = view.getUint32(16, true)
-  const dataOffset = view.getUint32(20, true)
-  const tileCount = view.getUint32(24, true)
-
-  let index = head.body
-  if (HEADER_BYTES + indexBytes > index.byteLength) {
-    index = (await fetchRange(url, 0, dataOffset - 1)).body
+  if (magic !== MAGIC) throw new Error('Terrain file has the wrong magic')
+  if (view.getUint16(8, true) !== VERSION) {
+    throw new Error(`Terrain file is version ${view.getUint16(8, true)}, expected ${VERSION}`)
   }
+  return {
+    tileSize: view.getUint16(10, true),
+    border: view.getUint8(12),
+    levels: view.getUint8(13),
+    level: view.getUint8(14),
+    indexBytes: view.getUint32(16, true),
+    dataOffset: view.getUint32(20, true),
+    tileCount: view.getUint32(24, true),
+    peak: view.getInt16(28, true),
+  }
+}
 
-  const offsets = new Uint32Array(tileCount)
-  const lengths = new Uint32Array(tileCount)
-  const errors = new Uint16Array(tileCount)
-  const highest = new Int16Array(tileCount)
+function readIndex(
+  url: string,
+  index: Uint8Array,
+  head: Header,
+  whole: Uint8Array | null,
+): LevelFile {
+  const offsets = new Uint32Array(head.tileCount)
+  const lengths = new Uint32Array(head.tileCount)
+  const errors = new Uint16Array(head.tileCount)
   const entries = new DataView(index.buffer, index.byteOffset, index.byteLength)
-  for (let i = 0; i < tileCount; i++) {
+  for (let i = 0; i < head.tileCount; i++) {
     const at = HEADER_BYTES + i * INDEX_ENTRY_BYTES
     offsets[i] = entries.getUint32(at, true)
     lengths[i] = entries.getUint32(at + 4, true)
     errors[i] = entries.getUint16(at + 8, true)
-    highest[i] = entries.getInt16(at + 12, true)
   }
+  return { url, dataOffset: head.dataOffset, offsets, lengths, errors, whole }
+}
 
-  const levelBase = new Uint32Array(levels + 1)
-  let base = 0
-  for (let z = 0; z < levels; z++) {
-    levelBase[z] = base
-    base += tilesAcross(z) * tilesDown(z)
-  }
-  levelBase[levels] = base
+/**
+ * Read a level's index, once, the first time anything wants a tile from it.
+ *
+ * A level that is not deployed answers 404 and is written off for good, which
+ * is what makes the deep levels optional: sampling falls back to the finest
+ * ancestor that did arrive, so the picture is coarser and nothing breaks.
+ */
+function openLevel(z: number) {
+  const it = archive
+  if (!it || it.status[z] !== 'absent') return
+  it.status[z] = 'opening'
 
-  archive = {
-    url,
-    levels,
-    tileSize,
-    border,
-    stored: tileSize + 2 * border,
-    dataOffset,
-    offsets,
-    lengths,
-    errors,
-    highest,
-    levelBase,
-    // A host that ignored the range sent everything; keep it rather than ask
-    // again, and serve every tile out of it.
-    whole: head.ranged ? null : head.body,
-  }
-
-  let peak = 0
-  for (let i = 0; i < tileCount; i++) if (highest[i] > peak) peak = highest[i]
-
-  state.levels = levels
-  state.tileSize = tileSize
-  state.maxLift = peak / EARTH_RADIUS_M
-  // Stamps start at zero, so the clock must not; otherwise the first frame
-  // reads every tile as already asked for.
-  asked = new Uint32Array(tileCount)
-  clock = 1
-
-  // Level 0 is the whole world at 78 km a sample. Everything else is optional.
-  const base0 = levelBase[0]
-  const count0 = tilesAcross(0) * tilesDown(0)
-  await Promise.all(
-    Array.from({ length: count0 }, (_, i) => load(base0 + i)),
-  )
-  state.ready = true
+  const url = `${it.base}-${z}.bin`
+  void (async () => {
+    try {
+      // One request covers the header and the index for any level worth
+      // shipping: level 4 is 2048 tiles, which is 32 kB of index.
+      const first = await fetchRange(url, 0, 65535)
+      const head = readHeader(first.body)
+      let index = first.body
+      if (!first.ranged) {
+        it.files[z] = readIndex(url, index, head, first.body)
+      } else {
+        if (HEADER_BYTES + head.indexBytes > index.byteLength) {
+          index = (await fetchRange(url, 0, head.dataOffset - 1)).body
+        }
+        it.files[z] = readIndex(url, index, head, null)
+      }
+      it.status[z] = 'ready'
+    } catch {
+      // Not deployed, which is a normal way to ship: coarse levels in the
+      // package, fine ones hosted or not at all.
+      it.status[z] = 'missing'
+    }
+  })()
 }
 
 const tilesAcross = (z: number) => 4 << z
@@ -241,20 +326,8 @@ async function fetchRange(url: string, from: number, to: number): Promise<Ranged
   return { body, ranged: response.status === 206 }
 }
 
-/** Fetch and decode one tile. */
-async function load(id: number): Promise<void> {
-  const it = archive!
-  await loadRun({
-    from: it.offsets[id],
-    to: it.offsets[id] + it.lengths[id],
-    ids: [id],
-    level: 0,
-    error: 0,
-  })
-}
-
 /**
- * Fetch one stretch of the archive and decode every tile in it.
+ * Fetch one stretch of a level's file and decode every tile in it.
  *
  * One request however many tiles the run covers, which is the whole point of
  * coalescing; the payloads are cut back out of the response by the offsets the
@@ -262,17 +335,20 @@ async function load(id: number): Promise<void> {
  */
 async function loadRun(run: Run): Promise<void> {
   const it = archive!
+  const file = it.files[run.level]
+  if (!file) return
   const fresh = run.ids.filter((id) => !tiles.has(id) && !pending.has(id))
   if (!fresh.length) return
   fresh.forEach((id) => pending.add(id))
 
+  const base = it.levelBase[run.level]
   try {
     let block: Uint8Array
-    if (it.whole) {
-      block = it.whole.subarray(it.dataOffset + run.from, it.dataOffset + run.to)
+    if (file.whole) {
+      block = file.whole.subarray(file.dataOffset + run.from, file.dataOffset + run.to)
     } else {
       block = (
-        await fetchRange(it.url, it.dataOffset + run.from, it.dataOffset + run.to - 1)
+        await fetchRange(file.url, file.dataOffset + run.from, file.dataOffset + run.to - 1)
       ).body
     }
 
@@ -283,8 +359,8 @@ async function loadRun(run: Run): Promise<void> {
     // overlap, and the run lands in one go.
     const decoded = await Promise.all(
       fresh.map((id) => {
-        const at = it.offsets[id] - run.from
-        return decode(block.subarray(at, at + it.lengths[id]), it.stored)
+        const at = file.offsets[id - base] - run.from
+        return decode(block.subarray(at, at + file.lengths[id - base]), it.stored)
       }),
     )
     fresh.forEach((id, k) => tiles.set(id, { samples: decoded[k], used: clock }))
@@ -349,6 +425,14 @@ export function want(z: number, x: number, y: number) {
   if (asked[id] === clock) return
   asked[id] = clock
   if (tiles.has(id) || pending.has(id)) return
+  // The level's index has to be in hand before a tile of it can be asked for by
+  // offset. Reading it is one small request; until it lands the ask is simply
+  // dropped, and the next frame - which wants much the same ground - raises it
+  // again.
+  if (it.status[z] !== 'ready') {
+    openLevel(z)
+    return
+  }
   wanted.push(id)
 }
 
@@ -389,25 +473,35 @@ export function pump() {
   // Measured over a real session: 421 tile fetches become 92 requests, for
   // exactly the same bytes.
   runs.length = 0
-  wanted.sort((a, b) => it.offsets[a] - it.offsets[b])
+  // By level first, because offsets are within a level's own file and a run
+  // cannot span two of them; then by offset, so neighbours end up adjacent.
+  wanted.sort((a, b) => {
+    const za = levelOf(a)
+    const zb = levelOf(b)
+    if (za !== zb) return za - zb
+    return it.files[za]!.offsets[a - it.levelBase[za]] - it.files[zb]!.offsets[b - it.levelBase[zb]]
+  })
 
   let run: Run | null = null
   for (const id of wanted) {
     if (tiles.has(id) || pending.has(id)) continue
-    const from = it.offsets[id]
-    if (run && from === run.to) {
-      run.to = from + it.lengths[id]
+    const z = levelOf(id)
+    const file = it.files[z]
+    if (!file) continue
+    const local = id - it.levelBase[z]
+    const from = file.offsets[local]
+    if (run && run.level === z && from === run.to) {
+      run.to = from + file.lengths[local]
       run.ids.push(id)
-      if (levelOf(id) < run.level) run.level = levelOf(id)
-      if (it.errors[id] > run.error) run.error = it.errors[id]
+      if (file.errors[local] > run.error) run.error = file.errors[local]
       continue
     }
     run = {
       from,
-      to: from + it.lengths[id],
+      to: from + file.lengths[local],
       ids: [id],
-      level: levelOf(id),
-      error: it.errors[id],
+      level: z,
+      error: file.errors[local],
     }
     runs.push(run)
   }
@@ -430,12 +524,13 @@ export function pump() {
   wanted.length = 0
 }
 
-/** A contiguous stretch of the archive covering several tiles. */
+/** A contiguous stretch of one level's file, covering several tiles. */
 type Run = {
+  /** Offsets within that level's file, relative to its data section. */
   from: number
   to: number
   ids: number[]
-  /** Coarsest level in the run, and the largest error, for ordering. */
+  /** The level the run belongs to, and its largest error, for ordering. */
   level: number
   error: number
 }

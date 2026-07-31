@@ -400,11 +400,12 @@ function shadeTerrain(
     rasteriseTerrain(mesh, camera, place, gbuffer, exaggeration)
     lastTriangles = mesh.lonSteps * mesh.latSteps * 2
   }
-  lastDetail = detail
 
   const light = worldLight(camera)
   const groundPerSample = groundAt(detail)
   const { u: uBuf, v: vBuf, depth } = gbuffer
+  // The finest level anything on screen was actually shaded from.
+  let finest = -1
 
   for (let by = 0; by < height; by++) {
     const ny = (cy - (y0 + (by + 0.5) * stepY)) / radius
@@ -443,7 +444,10 @@ function shadeTerrain(
 
       // The tiles answer in true slope - rise per metre of ground - because
       // which level answered is not known here and would change the units.
-      sampleRelief(uBuf[sample], vBuf[sample], detail, relief)
+      // It is worth knowing all the same: asking for a level says nothing about
+      // whether it has arrived, or was ever deployed.
+      const answered = sampleRelief(uBuf[sample], vBuf[sample], detail, relief)
+      if (answered > finest) finest = answered
 
       const se = SHADE_EXAGGERATION * relief.east
       const sn = SHADE_EXAGGERATION * relief.north
@@ -521,6 +525,10 @@ function shadeTerrain(
         landRamp[ramp + 2] * landGain * landness
     }
   }
+
+  // What was drawn, not what was hoped for. The two differ while tiles are on
+  // their way, and permanently if the deeper levels were never deployed.
+  lastDetail = finest < 0 ? 0 : finest
 }
 
 // Scratch for the environment lookup, so it can return three numbers without

@@ -12,11 +12,12 @@ import type { ModelPlacement } from '../globe/models'
 import './GlobeCanvas.css'
 
 /**
- * The tiled terrain archive, served as a static file and read by byte range.
- * Kept out of the bundle deliberately: it is data, and the point of tiling it
- * is that almost none of it is fetched.
+ * The terrain files, one per level, as `terrain-0.bin` upwards. Kept out of the
+ * bundle deliberately: they are data, and the point of tiling is that almost
+ * none of it is fetched. Only level 0 is needed to draw; whichever deeper
+ * levels are deployed are found from there.
  */
-const TERRAIN_URL = `${import.meta.env.BASE_URL}terrain.bin`
+const TERRAIN_BASE = `${import.meta.env.BASE_URL}terrain`
 
 /** The level the fixed lon/lat mesh is built from, when it is asked for. */
 const UNIFORM_LEVEL = 2
@@ -63,7 +64,7 @@ export function GlobeCanvas() {
   // Until this lands the globe is a smooth sphere, which is what it looked like
   // before there was any relief at all.
   useEffect(() => {
-    openTerrain(TERRAIN_URL).catch((error: unknown) => {
+    openTerrain(TERRAIN_BASE).catch((error: unknown) => {
       console.warn('Terrain unavailable; shading the globe flat.', error)
     })
   }, [])

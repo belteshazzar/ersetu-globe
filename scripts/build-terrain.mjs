@@ -44,6 +44,23 @@
  * from what its parent already said - the error you accept by not fetching it.
  * That is the number the renderer needs to decide whether a tile is worth
  * asking for, and to stop refining geometry over ground that is flat.
+ *
+ * One file per level, not one file for the pyramid and not one file per region.
+ *
+ * Per region was measured and is a trap: a region's file holds every depth of
+ * that region, but a view wants one or two depths at a time, so zooming to
+ * 10 km somewhere drags the 5 km data for the whole surrounding block along
+ * with it - between twice and ten times the bytes, depending on where the split
+ * goes. Locality was never the problem anyway: a level is laid out row by row,
+ * what is on screen at one level is a band of rows, and the client already
+ * fetches such a band as one coalesced range.
+ *
+ * Per level is worth it for the reasons a byte range cannot give you. Whole
+ * files are cached by every CDN and service worker without special handling,
+ * where a 206 is cached unevenly; and a level can be added to a deployment by
+ * uploading a file, without rebuilding or re-committing the ones already there.
+ * Level 0 is small enough to fetch whole, which makes the bootstrap a single
+ * plain GET.
  */
 import { readFile, writeFile } from 'node:fs/promises'
 import { deflateSync, inflateSync } from 'node:zlib'
@@ -58,7 +75,8 @@ const BORDER = 1
 const STORED = TILE + 2 * BORDER
 
 const MAGIC = 'ERSETILE'
-const VERSION = 1
+/** 2 is one file per level; 1 was the whole pyramid in one. */
+const VERSION = 2
 const HEADER_BYTES = 32
 const INDEX_ENTRY_BYTES = 16
 
@@ -73,7 +91,8 @@ const option = (name, fallback) => {
 
 const LEVELS = Number(option('levels', 4)) + 1
 const SOURCE = option('source', null)
-const OUT = option('out', new URL('../public/terrain.bin', import.meta.url).pathname)
+/** Files are written as `<prefix>-<level>.bin`. */
+const OUT = option('out', new URL('../public/terrain', import.meta.url).pathname)
 
 if (!Number.isInteger(LEVELS) || LEVELS < 1 || LEVELS > 7) {
   console.error(`Bad --levels "${option('levels')}". Expected 0 to 6.`)
@@ -406,15 +425,17 @@ const finest = await loadFinest()
 console.log('Building the pyramid...')
 const pyramid = buildPyramid(finest)
 
-let tileCount = 0
-for (let z = 0; z < LEVELS; z++) tileCount += tilesAcrossAt(z) * tilesDownAt(z)
+// The tallest ground anywhere, taken from the finest level so that a client
+// holding only level 0 still knows how far terrain can stand off the sphere.
+// It sizes the region that gets shaded, and clipping it would saw the tops off
+// mountains at the limb.
+let peak = 0
+for (const sample of pyramid[FINEST]) if (sample > peak) peak = sample
 
-const index = Buffer.alloc(tileCount * INDEX_ENTRY_BYTES)
-const payloads = []
-let offset = 0
-let entry = 0
+console.log('\nCutting tiles...')
+let total = 0
+let firstLevelBytes = 0
 
-console.log(`\nCutting ${tileCount} tiles...`)
 for (let z = 0; z < LEVELS; z++) {
   const width = levelWidth(z)
   const grid = pyramid[z]
@@ -424,7 +445,11 @@ for (let z = 0; z < LEVELS; z++) {
 
   const across = tilesAcrossAt(z)
   const down = tilesDownAt(z)
-  let levelBytes = 0
+  const tileCount = across * down
+  const index = Buffer.alloc(tileCount * INDEX_ENTRY_BYTES)
+  const payloads = []
+  let offset = 0
+  let entry = 0
 
   for (let tileY = 0; tileY < down; tileY++) {
     for (let tileX = 0; tileX < across; tileX++) {
@@ -456,40 +481,44 @@ for (let z = 0; z < LEVELS; z++) {
 
       payloads.push(packed)
       offset += packed.length
-      levelBytes += packed.length
       entry++
     }
   }
 
+  // Every file says how many levels the pyramid had, so a client that has only
+  // level 0 knows what else it may ask for - and gets a 404 it can live with if
+  // the deeper ones were not deployed.
+  const header = Buffer.alloc(HEADER_BYTES)
+  header.write(MAGIC, 0, 'ascii')
+  header.writeUInt16LE(VERSION, 8)
+  header.writeUInt16LE(TILE, 10)
+  header.writeUInt8(BORDER, 12)
+  header.writeUInt8(LEVELS, 13)
+  header.writeUInt8(z, 14)
+  header.writeUInt32LE(index.length, 16)
+  header.writeUInt32LE(HEADER_BYTES + index.length, 20)
+  header.writeUInt32LE(tileCount, 24)
+  header.writeInt16LE(peak, 28)
+
+  const file = Buffer.concat([header, index, ...payloads])
+  await writeFile(`${OUT}-${z}.bin`, file)
+  total += file.length
+  if (z === 0) firstLevelBytes = file.length
+
   const rawBytes = width * levelHeight(z) * 2
   console.log(
-    `  level ${z}: ${String(across * down).padStart(4)} tiles  ` +
-      `${mb(levelBytes).padStart(8)}  from ${mb(rawBytes)} raw  ` +
-      `(${(rawBytes / levelBytes).toFixed(1)}:1)  ` +
-      `${(360 / width).toFixed(3)} deg/sample`,
+    `  level ${z}: ${String(tileCount).padStart(4)} tiles  ` +
+      `${mb(file.length).padStart(8)}  from ${mb(rawBytes)} raw  ` +
+      `(${(rawBytes / file.length).toFixed(1)}:1)  ` +
+      `${(360 / width).toFixed(3)} deg/sample  ` +
+      `-> ${OUT.split('/').pop()}-${z}.bin`,
   )
 }
 
-const header = Buffer.alloc(HEADER_BYTES)
-header.write(MAGIC, 0, 'ascii')
-header.writeUInt16LE(VERSION, 8)
-header.writeUInt16LE(TILE, 10)
-header.writeUInt8(BORDER, 12)
-header.writeUInt8(LEVELS, 13)
-header.writeUInt16LE(0, 14)
-header.writeUInt32LE(index.length, 16)
-header.writeUInt32LE(HEADER_BYTES + index.length, 20)
-header.writeUInt32LE(tileCount, 24)
-
-const archive = Buffer.concat([header, index, ...payloads])
-await writeFile(OUT, archive)
-
 console.log(
-  `\nWrote ${tileCount} tiles over ${LEVELS} levels, ${mb(archive.length)}\n` +
-    `  header and index ${(header.length + index.length) / 1024 < 1024 ? `${((header.length + index.length) / 1024).toFixed(1)} kB` : mb(header.length + index.length)}` +
-    ` - one request, then a range per tile\n` +
-    `  level 0 alone is ${mb(payloads.slice(0, 8).reduce((n, p) => n + p.length, 0))}, which is all the globe needs to draw\n` +
-    `  -> ${OUT}`,
+  `\nWrote ${LEVELS} level files, ${mb(total)} in all, peak ${peak} m\n` +
+    `  level 0 is ${mb(firstLevelBytes)} and draws the whole world - one plain GET, no range needed\n` +
+    `  deeper levels are optional: host the files you want, the client falls back to what is there`,
 )
 
 function mb(bytes) {

@@ -326,10 +326,11 @@ sampling matters — keeping one 15 arc-second cell out of every block would hol
 whichever peak or trench it landed on and drop the rest, which reads as speckle
 once it lights a surface.
 
-The result is a pyramid, not one grid, cut into 128-sample tiles and packed into
-`public/terrain.bin`. It is rooted to match the geometry: level 0 is four tiles
-around by two down, which is exactly the eight lon/lat boxes of the octahedron
-the quadtree starts from, and each level doubles.
+The result is a pyramid, not one grid, cut into 128-sample tiles and written one
+file per level as `public/terrain-<level>.bin`. It is rooted to match the
+geometry: level 0 is four tiles around by two down, which is exactly the eight
+lon/lat boxes of the octahedron the quadtree starts from, and each level
+doubles.
 
 | level | grid | deg/sample | ground | size |
 | --- | --- | --- | --- | --- |
@@ -347,17 +348,32 @@ very edge of a tile need nothing but that tile. Each is compressed on its own �
 which gives up some ratio, but is what makes a tile independently fetchable and
 decodable without its neighbours or its parent.
 
-The client reads the index once and then asks for byte ranges, which every
-static host already does, with no server logic anywhere. If a host does not
-honour Range it says so by sending the whole file, and the client notices and
-serves every tile from memory instead. That is the difference between 234 kB and
-3.6 MB before the globe has any shape: level 0 draws the whole world, and
-everything after it is detail fetched for the part being looked at. A session
-that zooms into two continents transfers about 9% of the archive.
+Level 0 arrives whole, in one plain GET — 191 kB, the entire world, and nothing
+can be drawn without it. Deeper levels are opened only when something wants
+them: one small range request for the index, then range requests for the tiles.
+That is the difference between 191 kB and 3.6 MB before the globe has any shape.
 
-Sampling always succeeds. Asking for a level that has not arrived walks up the
-pyramid to the finest ancestor that has, so the picture is never missing, only
-coarser than it will shortly be.
+Tiles a view wants are neighbours on the globe, and a level is laid out row by
+row, so the bytes covering twenty tiles are very often one run. The client
+merges touching tiles into a single request — measured over a real session, 421
+tile fetches become 92 requests for exactly the same bytes.
+
+One file per level, rather than one for the pyramid or one per region. Per
+region was measured and is a trap: a region's file holds every depth of it, but
+a view wants one or two depths at a time, so it costs between twice and ten
+times the bytes. Locality was never the problem — the client already fetches a
+band of tiles as one range. Whole per-level files are what byte ranges cannot
+give you: every CDN and service worker caches them without special handling, and
+a level can be added to a deployment by uploading a file.
+
+So the deep levels are optional. Ship levels 0–2 and host 3 and 4, or don't:
+a level that is not there is asked for once, written off, and the picture simply
+stays coarser. Sampling always succeeds — asking for a level that has not
+arrived walks up the pyramid to the finest ancestor that has. The `detail`
+readout shows the level actually drawn from, not the one asked for.
+
+If a host does not honour Range it says so by sending the whole file, and the
+client notices and serves every tile from memory instead.
 
 ## Licence
 
