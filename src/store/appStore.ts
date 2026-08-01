@@ -19,6 +19,8 @@ export type AppState = {
    * is worth being able to switch off to see the ground on its own.
    */
   outlines: boolean
+  /** Whether the weather overlay is painted over the surface. */
+  overlay: boolean
   /**
    * Triangles the last frame's geometry cost, rounded to the nearest hundred.
    *
@@ -64,6 +66,7 @@ const initialState: AppState = {
   zoom: 1,
   autoRotate: true,
   outlines: true,
+  overlay: false,
   meshTriangles: 0,
   detail: 0,
   fps: 0,
@@ -109,6 +112,9 @@ export const actions = {
   },
   toggleOutlines() {
     appStore.setState({ outlines: !appStore.getState().outlines })
+  },
+  toggleOverlay() {
+    appStore.setState({ overlay: !appStore.getState().overlay })
   },
   /**
    * Report what the last frame's geometry cost. Called from the render loop, so

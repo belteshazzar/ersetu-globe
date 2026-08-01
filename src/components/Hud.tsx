@@ -14,6 +14,7 @@ export function Hud() {
   const zoom = useAppStore((s) => s.zoom.toFixed(2))
   const autoRotate = useAppStore((s) => s.autoRotate)
   const outlines = useAppStore((s) => s.outlines)
+  const overlay = useAppStore((s) => s.overlay)
   const exaggeration = useAppStore((s) => s.exaggeration)
   const triangles = useAppStore((s) => s.meshTriangles)
   const detail = useAppStore((s) => s.detail)
@@ -89,6 +90,13 @@ export function Hud() {
           onClick={actions.toggleOutlines}
         >
           Outlines
+        </button>
+        <button
+          type="button"
+          aria-pressed={overlay}
+          onClick={actions.toggleOverlay}
+        >
+          Weather
         </button>
         <button type="button" onClick={actions.reset}>
           Reset

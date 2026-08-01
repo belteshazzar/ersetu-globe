@@ -11,14 +11,29 @@ import {
 } from './projection'
 import { paintSphere, FLAT_LAND_CSS } from './surface'
 import { drawSurface, meshStats } from './mesh'
+import { setOverlay } from './gl'
+import type { Overlay } from './overlay'
 import { prefetchResident, pump, tick as tickTerrain } from './tiles'
 import type { Shape } from './shapes'
+import type { Region } from './regions'
 import { drawOrbits, type Orbit } from './orbits'
 import { drawLabels, type Label } from './labels'
 import { drawModels, type ModelPlacement } from './models'
 
 /** Everything drawn on top of the globe itself. */
 export type Scene = {
+  /**
+   * A scalar field painted over the whole surface - weather, most likely.
+   * Drawn by the surface shader itself, so it is occluded by the horizon and
+   * follows the displaced ground exactly as the terrain does.
+   */
+  overlay?: Overlay
+  /**
+   * Filled areas lying on the surface, drawn beneath every line in the scene.
+   * Fills are ground and lines are annotation, so the lines stay legible over
+   * them rather than the other way about.
+   */
+  regions?: readonly Region[]
   /** Geometry lying on the surface. */
   shapes?: readonly Shape[]
   /** Orbits standing off the surface, with their satellites. */
@@ -110,6 +125,9 @@ export function renderGlobe(
   const { cx, cy, radius } = camera
 
   tickTerrain()
+  // Costs two identity comparisons when nothing has changed, which is why it
+  // can sit in the frame rather than behind a caller having to remember.
+  setOverlay(scene.overlay ?? null)
 
   // The surface goes to the GPU, on its own canvas behind this one. It is a
   // static mesh, so this culls, draws, and - for the first second of a session
@@ -159,6 +177,21 @@ export function renderGlobe(
   ctx.lineWidth = 1.25
   ctx.lineJoin = 'round'
   ctx.lineCap = 'round'
+
+  // Areas first, under every line: a fill is ground, and the graticule and
+  // coastlines drawn over it stay legible rather than being buried by it.
+  for (const item of scene.regions ?? []) {
+    if (item.style.fill) {
+      ctx.fillStyle = item.style.fill
+      fillPolygons(ctx, item.polygons, camera)
+    }
+    if (item.style.stroke) {
+      ctx.strokeStyle = item.style.stroke
+      ctx.lineWidth = item.style.width ?? 1.25
+      strokeMesh(ctx, item.outline, camera)
+    }
+  }
+  ctx.lineWidth = 1.25
 
   ctx.strokeStyle = GRATICULE
   strokeMesh(ctx, graticule, camera)

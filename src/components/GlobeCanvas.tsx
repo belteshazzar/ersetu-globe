@@ -3,6 +3,8 @@ import { actions, appStore } from '../store/appStore'
 import { globeCamera, renderGlobe, type Viewport } from '../globe/renderer'
 import { unproject } from '../globe/projection'
 import { DEMO_SHAPES } from '../globe/demoShapes'
+import { demoRegionsAt } from '../globe/demoRegions'
+import { demoOverlayAt } from '../globe/demoOverlay'
 import { DEMO_ORBITS, DEMO_TIME_SCALE } from '../globe/demoOrbits'
 import { DEMO_LABELS } from '../globe/demoLabels'
 import { openTerrain } from '../globe/tiles'
@@ -145,6 +147,8 @@ export function GlobeCanvas() {
         ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0)
         const drawStart = performance.now()
         renderGlobe(ctx, viewport, next, {
+          overlay: next.overlay ? demoOverlayAt(next.elapsed) : undefined,
+          regions: demoRegionsAt(next.elapsed),
           shapes: DEMO_SHAPES,
           orbits: DEMO_ORBITS,
           labels: DEMO_LABELS,

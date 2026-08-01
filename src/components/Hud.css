@@ -123,13 +123,17 @@
   border-radius: 2px;
 }
 
+/* Two columns rather than a row. The panel has no width of its own - it is
+   shrink-to-fit - so a row of buttons sets it from their total, and every
+   control added widens the whole thing over the globe. A two-column grid is
+   only ever as wide as two buttons, which leaves the readout above deciding. */
 .hud__controls {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 0.5rem;
 }
 
 .hud__controls button {
-  flex: 1;
   padding: 0.35rem 0.6rem;
   border: 1px solid rgba(120, 190, 255, 0.25);
   border-radius: 0.3rem;

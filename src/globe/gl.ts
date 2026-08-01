@@ -21,6 +21,7 @@
  * triangular grid over a different patch of sphere.
  */
 import type { Camera } from './projection'
+import { spanEast, type Field, type Overlay } from './overlay'
 
 const EARTH_RADIUS_M = 6_371_000
 
@@ -36,6 +37,7 @@ uniform vec2 uViewport;
 
 varying float vHeight;
 varying vec2 vDisc;
+varying vec3 vDirection;
 
 void main() {
   // The whole of the exaggeration control: the vertex holds the shape of the
@@ -51,6 +53,10 @@ void main() {
   // Where this lands on the disc, in globe radii, which is all the environment
   // gradient needs: it is fixed to the disc, not to the ground.
   vDisc = view.xy;
+  // The undisplaced direction, for the overlay to turn back into a longitude
+  // and a latitude. Undisplaced, so that raising the relief slider slides the
+  // ground about beneath a map that stays put.
+  vDirection = aDirection;
   gl_Position = vec4(
     pixel.x / uViewport.x * 2.0 - 1.0,
     1.0 - pixel.y / uViewport.y * 2.0,
@@ -80,10 +86,36 @@ void main() {
  * disc, and the ground by how high it stands.
  */
 const FRAGMENT_SOURCE = `
+// The overlay takes an arc tangent and an arc cosine per pixel to find out
+// where on the map it is. At medium precision those band visibly across a
+// continent, so take the better float if the stage has one - almost all do, and
+// the guard is for the few that do not.
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 
 varying float vHeight;
 varying vec2 vDisc;
+varying vec3 vDirection;
+
+/**
+ * The scalar field either side of this moment, and the ramp both are coloured
+ * through. Two frames rather than one so that time is a mix of measurements,
+ * never a mix of colours - see the note in overlay.ts for why that matters.
+ */
+uniform sampler2D uField;
+uniform sampler2D uFieldNext;
+uniform float uMix;
+uniform sampler2D uPalette;
+/** How much of the overlay to show. Zero is off, and skips all of it. */
+uniform float uOverlay;
+/**
+ * Where the field lies: the west edge and the width it spans, then the north
+ * edge and the height, all as fractions of the globe.
+ */
+uniform vec4 uBounds;
 
 // paintSphere's inner circle: offset up and left, so the highlight sits where a
 // light would put it.
@@ -116,25 +148,58 @@ void main() {
     ? mix(SKY, HORIZON, t / HORIZON_STOP)
     : mix(HORIZON, GROUND, (t - HORIZON_STOP) / (1.0 - HORIZON_STOP));
 
+  vec3 colour;
   if (vHeight < 0.0) {
     // Bathymetry as brightness rather than hue, so the ridges, fracture zones
     // and abyssal plains all read without leaving the blue the gradient set.
     // Most of the sea floor lies between two and five kilometres down, which is
     // where this ramp spends its range.
     float deep = clamp(-vHeight / 6000.0, 0.0, 1.0);
-    gl_FragColor = vec4(environment * mix(1.30, 0.45, deep), 1.0);
-    return;
+    colour = environment * mix(1.30, 0.45, deep);
+  } else {
+    // The gradient again, as a light rather than a colour: bright under the
+    // highlight, falling away to the limb on the same two stops.
+    float shade = t < HORIZON_STOP
+      ? mix(1.30, 0.92, t / HORIZON_STOP)
+      : mix(0.92, 0.30, (t - HORIZON_STOP) / (1.0 - HORIZON_STOP));
+    // Everest is the ceiling; most land sits near the bottom of this, so the
+    // range is spent on the ground you actually see rather than on the peaks.
+    vec3 tone = mix(LAND, LAND_HIGH, clamp(vHeight / 3500.0, 0.0, 1.0));
+    colour = tone * shade;
   }
 
-  // The gradient again, as a light rather than a colour: bright under the
-  // highlight, falling away to the limb on the same two stops.
-  float shade = t < HORIZON_STOP
-    ? mix(1.30, 0.92, t / HORIZON_STOP)
-    : mix(0.92, 0.30, (t - HORIZON_STOP) / (1.0 - HORIZON_STOP));
-  // Everest is the ceiling; most land sits near the bottom of this, so the
-  // range is spent on the ground you actually see rather than on the peaks.
-  vec3 tone = mix(LAND, LAND_HIGH, clamp(vHeight / 3500.0, 0.0, 1.0));
-  gl_FragColor = vec4(tone * shade, 1.0);
+  if (uOverlay > 0.0) {
+    // Worked out per pixel, not per vertex, and that is not an optimisation to
+    // undo. Longitude runs from -pi to pi, so it jumps the whole way round at
+    // the antimeridian; interpolate it across a triangle and every triangle
+    // straddling that line smears the entire map through itself. Evaluated
+    // here the jump lands between pixels, where it belongs.
+    vec3 d = normalize(vDirection);
+    float east = atan(d.x, d.z) * 0.1591549431 + 0.5;
+    float south = acos(clamp(d.y, -1.0, 1.0)) * 0.3183098862;
+
+    // Measured east from the field's own west edge and wrapped there, so a box
+    // crossing the antimeridian needs no special case: fract always lands in
+    // one turn, and anything beyond the field's width falls outside it.
+    vec2 uv = vec2(
+      fract(east - uBounds.x) / uBounds.y,
+      (south - uBounds.z) / uBounds.w
+    );
+
+    // Outside its box a field says nothing, which is not the same as saying
+    // zero: the ground is left exactly as it was.
+    if (uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
+      // The measurement, then the colour - never the other way about. Mixing
+      // the two frames here, before the ramp, is what makes an in-between
+      // moment mean something: mixing their colours afterwards would average a
+      // blue and a red into a purple belonging to neither.
+      float value = mix(texture2D(uField, uv).r, texture2D(uFieldNext, uv).r, uMix);
+      vec4 tint = texture2D(uPalette, vec2(value, 0.5));
+      colour = mix(colour, tint.rgb, tint.a * uOverlay);
+    }
+  }
+
+  gl_FragColor = vec4(colour, 1.0);
 }
 `
 
@@ -148,9 +213,39 @@ type Program = {
   uCentre: WebGLUniformLocation | null
   uRadius: WebGLUniformLocation | null
   uViewport: WebGLUniformLocation | null
+  uOverlay: WebGLUniformLocation | null
+  uBounds: WebGLUniformLocation | null
+  uMix: WebGLUniformLocation | null
 }
 
 let ready: Program | null = null
+
+let paletteTexture: WebGLTexture | null = null
+let paletteSource: Uint8Array | null = null
+let overlayOpacity = 0
+let overlayMix = 0
+/** The two frames being drawn between, already uploaded. */
+let frameTexture: WebGLTexture | null = null
+let nextTexture: WebGLTexture | null = null
+/** The field's box as the shader wants it: west, width, north, height. */
+const overlayBounds = new Float32Array([0, 1, 0, 1])
+
+/**
+ * Every field that has been seen, against the texture holding it.
+ *
+ * Kept by identity, which is what makes a loop cheap: a sequence of frames
+ * cycled over and over is uploaded once each and thereafter costs a map lookup
+ * a frame. Uploading the two current frames every time round would be half a
+ * megabyte a frame for a global field, to say nothing that was not already
+ * said.
+ *
+ * Bounded, because a caller streaming a long forecast would otherwise hold
+ * every hour of it on the card forever. The least recently wanted goes first,
+ * which for anything cyclic never fires at all.
+ */
+const fields = new Map<Field, { texture: WebGLTexture; used: number }>()
+const FIELD_CACHE = 32
+let fieldClock = 0
 
 /** The one index buffer every chunk draws through, and how long it is. */
 let indexBuffer: WebGLBuffer | null = null
@@ -180,7 +275,17 @@ export function initGl(canvas: HTMLCanvasElement): boolean {
     uCentre: gl.getUniformLocation(program, 'uCentre'),
     uRadius: gl.getUniformLocation(program, 'uRadius'),
     uViewport: gl.getUniformLocation(program, 'uViewport'),
+    uOverlay: gl.getUniformLocation(program, 'uOverlay'),
+    uBounds: gl.getUniformLocation(program, 'uBounds'),
+    uMix: gl.getUniformLocation(program, 'uMix'),
   }
+
+  // Which texture unit each sampler reads. Fixed for the life of the program,
+  // so it is said once here rather than every frame.
+  gl.useProgram(program)
+  gl.uniform1i(gl.getUniformLocation(program, 'uField'), 0)
+  gl.uniform1i(gl.getUniformLocation(program, 'uPalette'), 1)
+  gl.uniform1i(gl.getUniformLocation(program, 'uFieldNext'), 2)
 
   gl.enable(gl.DEPTH_TEST)
   gl.depthFunc(gl.LESS)
@@ -266,6 +371,125 @@ export function setMeshChunk(id: number, vertices: Float32Array) {
 }
 
 /**
+ * Upload a field, or hand back the texture already holding it.
+ *
+ * Not mipmapped, deliberately. Longitude wraps within a single quad at the
+ * antimeridian, so the hardware sees an enormous rate of change there, picks
+ * the coarsest level it has, and draws a blurred line down the Pacific. Fields
+ * of weather are smooth enough at these sizes to go without.
+ */
+function textureFor(gl: WebGLRenderingContext, field: Field): WebGLTexture | null {
+  const held = fields.get(field)
+  if (held) {
+    held.used = ++fieldClock
+    return held.texture
+  }
+
+  if (fields.size >= FIELD_CACHE) {
+    let oldest: Field | null = null
+    let oldestUse = Infinity
+    for (const [key, value] of fields) {
+      if (value.used < oldestUse) {
+        oldestUse = value.used
+        oldest = key
+      }
+    }
+    if (oldest) {
+      gl.deleteTexture(fields.get(oldest)!.texture)
+      fields.delete(oldest)
+    }
+  }
+
+  const texture = gl.createTexture()
+  if (!texture) return null
+  gl.activeTexture(gl.TEXTURE0)
+  gl.bindTexture(gl.TEXTURE_2D, texture)
+  gl.texImage2D(
+    gl.TEXTURE_2D,
+    0,
+    gl.LUMINANCE,
+    field.width,
+    field.height,
+    0,
+    gl.LUMINANCE,
+    gl.UNSIGNED_BYTE,
+    field.samples,
+  )
+  // Only a field that goes the whole way round has an opposite edge worth
+  // sampling. A regional one clamps, or the filter reaches across the box and
+  // smears the far side of the domain into the near one.
+  gl.texParameteri(
+    gl.TEXTURE_2D,
+    gl.TEXTURE_WRAP_S,
+    spanEast(field.bounds) >= 360 ? gl.REPEAT : gl.CLAMP_TO_EDGE,
+  )
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+  // Plain linear, both ways: the default minification filter wants mipmaps, and
+  // a texture asked for one it does not have simply draws black.
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+
+  fields.set(field, { texture, used: ++fieldClock })
+  return texture
+}
+
+/**
+ * Hand over the overlay, or null to take it away.
+ *
+ * Uploads only what has not been seen before, so calling this every frame -
+ * with a still frame, or with a loop coming round again - costs a map lookup
+ * and an identity comparison.
+ */
+export function setOverlay(overlay: Overlay | null) {
+  const it = ready
+  if (!it) return
+  const { gl } = it
+
+  if (!overlay) {
+    overlayOpacity = 0
+    return
+  }
+  overlayOpacity = overlay.opacity
+
+  // The box comes from the first frame; a sequence shares one domain.
+  const box = overlay.field.bounds
+  overlayBounds[0] = (box.west + 180) / 360
+  overlayBounds[1] = spanEast(box) / 360
+  overlayBounds[2] = (90 - box.north) / 180
+  overlayBounds[3] = (box.north - box.south) / 180
+
+  frameTexture = textureFor(gl, overlay.field)
+  // With nothing to cross to, both samplers read the same frame and the mix is
+  // moot - which costs one redundant fetch and keeps the shader branchless.
+  nextTexture = overlay.next ? textureFor(gl, overlay.next) : frameTexture
+  overlayMix = overlay.next ? (overlay.mix ?? 0) : 0
+
+  if (overlay.palette !== paletteSource) {
+    paletteSource = overlay.palette
+    if (!paletteTexture) paletteTexture = gl.createTexture()
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, paletteTexture)
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      256,
+      1,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      overlay.palette,
+    )
+    // Clamped, so the ends of the scale hold rather than wrapping round from
+    // the hottest colour to the coldest.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+  }
+}
+
+/**
  * Draw the chunks named in `visible`, in one pass.
  *
  * The camera is uniform state, so the whole frame's cost is a handful of
@@ -312,6 +536,20 @@ export function drawMesh(
   gl.uniform2f(it.uCentre, camera.cx * viewport.dpr, camera.cy * viewport.dpr)
   gl.uniform1f(it.uRadius, camera.radius * viewport.dpr)
   gl.uniform2f(it.uViewport, width, height)
+
+  // Nothing to sample from means nothing to show, whatever the opacity says.
+  const overlay = frameTexture && paletteTexture ? overlayOpacity : 0
+  gl.uniform1f(it.uOverlay, overlay)
+  if (overlay > 0) {
+    gl.uniform4fv(it.uBounds, overlayBounds)
+    gl.uniform1f(it.uMix, overlayMix)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, frameTexture)
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, paletteTexture)
+    gl.activeTexture(gl.TEXTURE2)
+    gl.bindTexture(gl.TEXTURE_2D, nextTexture)
+  }
 
   gl.enableVertexAttribArray(it.aDirection)
   gl.enableVertexAttribArray(it.aHeight)
