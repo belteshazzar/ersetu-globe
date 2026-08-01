@@ -1,4 +1,19 @@
 /**
+ * PARKED. The globe's surface is a static mesh now - see `mesh.ts` - because a
+ * vertex's direction and height never change and so neither does the buffer
+ * holding them. Rebuilding the visible surface every frame could not reach the
+ * detail the archive already holds: two hundred thousand triangles cost four
+ * hundred milliseconds a frame in JavaScript, to feed a card that draws ten
+ * times as many in one.
+ *
+ * Kept because the view-dependent walk is still the right shape for levels
+ * *past* what is held resident - the deeper tiles a zoom would stream in, which
+ * cannot be uniform because there is far too much of them. Nothing calls it
+ * today: the archive stops at tile level 2, which is exactly what the static
+ * mesh is built to.
+ *
+ * ---
+ *
  * The globe as a view-dependent quadtree, rather than one fixed lon/lat mesh.
  *
  * A fixed lon/lat mesh - which is what this replaced - carries the same number
@@ -46,7 +61,6 @@
  * exactly the same chain of vertices.
  */
 import type { Camera } from './projection'
-import { rasteriseTriangle, type BufferPlacement, type GBuffer } from './terrain'
 import { height, sampledLevel, terrainState, wantAt } from './tiles'
 
 const EARTH_RADIUS_M = 6_371_000
@@ -64,13 +78,26 @@ const EARTH_RADIUS_M = 6_371_000
 const TILE_LEVEL_OFFSET = 7
 
 /**
- * How long an edge may look on screen before a node splits, in buffer samples.
+ * How long an edge may look on screen before a node splits, in CSS pixels.
  *
- * The buffer is shaded at about half display resolution, so this is roughly
- * twice as many CSS pixels. Below about six the triangles are smaller than the
- * samples they cover and the setup is all that is being paid for.
+ * Every triangle is a filled canvas path now rather than a few samples of a
+ * buffer, and the cost of a frame turns out to follow the number of paths far
+ * more than the area they cover: measured at 1400x900 on a two-times display,
+ * going from 30 to 50 took the whole frame from 15 to 23 a second, and 50 to 80
+ * bought only two more. This sits at the knee.
+ *
+ * It also sets how fine the shading can be, since the surface is lit per face -
+ * so it is a straight trade between smoothness and frame rate.
+ *
+ * Read it as a ceiling rather than a target. A node splits when its longest
+ * edge exceeds this, and the children come out at half, so leaves land between
+ * a half and a whole; the longest edge of a triangle is longer than its typical
+ * one; stitching a coarse leaf to a finer neighbour fans it into several; and
+ * the foreshortening term above refines the rim harder still. Measured, the
+ * faces come out about two and a half times finer than the number says - 60
+ * gives triangles averaging some 23 pixels across.
  */
-const SPLIT_SAMPLES = 9
+const SPLIT_PIXELS = 16
 
 /**
  * How much of an edge's foreshortening to believe.
@@ -118,7 +145,14 @@ let lifts = new Float32Array(0)
 let coords = new Float32Array(0)
 let screenX = new Float32Array(0)
 let screenY = new Float32Array(0)
-let screenZ = new Float32Array(0)
+/**
+ * Camera-space position, in globe radii. Screen x and y are these scaled and
+ * shifted, so keeping them costs two arrays and saves the painter from undoing
+ * the transform to work out which way a face is turned.
+ */
+let camX = new Float32Array(0)
+let camY = new Float32Array(0)
+let camZ = new Float32Array(0)
 /** Frame this vertex was last projected. */
 let projected = new Uint32Array(0)
 /** Frame this vertex was created as the midpoint of a splitting edge. */
@@ -158,9 +192,6 @@ const EMPTY = 0xffffffff
 /** Whether the base octahedron has been laid down yet. */
 let seeded = false
 
-/** The tile level the shading is reading this frame, which is what to fetch for. */
-let detailLevel = 0
-
 /**
  * Frame counter, used to stamp the scratch state. Starts at 1 so that a zeroed
  * stamp reads as "never", and never resets - at sixty frames a second a 32-bit
@@ -174,12 +205,11 @@ let cosLon = 1
 let sinLon = 0
 let cosLat = 1
 let sinLat = 0
-let scaleX = 1
-let scaleY = 1
-let offsetX = 0
-let offsetY = 0
-let bufferWidth = 0
-let bufferHeight = 0
+let centreX = 0
+let centreY = 0
+let radiusPx = 1
+let viewWidth = 0
+let viewHeight = 0
 let exaggeration = 0
 let maxLift = 0
 
@@ -195,6 +225,8 @@ export type QuadtreeStats = {
   depth: number
   /** Vertices held in the cache. */
   vertices: number
+  /** The finest tile level any vertex on screen actually got its height from. */
+  detail: number
 }
 
 const stats: QuadtreeStats = {
@@ -203,6 +235,7 @@ const stats: QuadtreeStats = {
   culled: 0,
   depth: 0,
   vertices: 0,
+  detail: -1,
 }
 
 export function quadtreeStats(): QuadtreeStats {
@@ -257,24 +290,22 @@ for (let level = 0; level <= DEEPEST; level++) {
 }
 
 /**
- * Select and rasterise the visible surface for this frame.
+ * Select the visible surface for this frame and hand back its triangles.
  *
- * Stands in for `rasteriseTerrain`, and writes the same G-buffer: which point
- * of the elevation grid each sample landed on, and how near it was. Everything
- * downstream - the shading, the colouring, the silhouette - is unchanged.
+ * Returns how many were produced; the geometry itself is in the arrays below,
+ * which are reused every frame. The painter turns them into filled paths - it
+ * needs a face normal and a height to pick a colour, and a depth to sort by,
+ * and all three fall out of work the selection has already done.
  */
-export function rasteriseQuadtree(
+export function selectSurface(
   camera: Camera,
-  place: BufferPlacement,
-  target: GBuffer,
+  viewport: { width: number; height: number },
   exaggerationNow: number,
-  shadeLevel: number,
-) {
+): number {
   const terrain = terrainState()
   if (!seeded) reset()
 
   frame++
-  detailLevel = shadeLevel
   // No point refining geometry past the data: a vertex between two samples of
   // the same cell only ever interpolates the straight line already there.
   maxLevel = terrain.levels - 1 + TILE_LEVEL_OFFSET
@@ -282,12 +313,11 @@ export function rasteriseQuadtree(
   sinLon = camera.sinLon
   cosLat = camera.cosLat
   sinLat = camera.sinLat
-  scaleX = place.scaleX
-  scaleY = place.scaleY
-  offsetX = place.offsetX
-  offsetY = place.offsetY
-  bufferWidth = target.width
-  bufferHeight = target.height
+  centreX = camera.cx
+  centreY = camera.cy
+  radiusPx = camera.radius
+  viewWidth = viewport.width
+  viewHeight = viewport.height
   exaggeration = exaggerationNow
   maxLift = terrain.maxLift
 
@@ -295,6 +325,7 @@ export function rasteriseQuadtree(
   stats.nodes = 0
   stats.culled = 0
   stats.depth = 0
+  stats.detail = -1
 
   // The pool is only ever grown, so this drops it whole rather than evicting.
   // Cheaper than tracking use per vertex, and it happens almost never.
@@ -305,14 +336,72 @@ export function rasteriseQuadtree(
     select(BASE_FACES[f], BASE_FACES[f + 1], BASE_FACES[f + 2], 0)
   }
 
-  // Drawing is a second pass because stitching asks what the *finished*
+  // Emitting is a second pass because stitching asks what the *finished*
   // selection looks like: a leaf cannot know whether its neighbour split until
   // that neighbour has been visited, and the neighbour may come later.
+  triangleCount = 0
   for (let i = 0; i < leafCount; i += 3) {
-    emit(target, leaves[i], leaves[i + 1], leaves[i + 2])
+    emit(leaves[i], leaves[i + 1], leaves[i + 2])
   }
 
   stats.vertices = count
+  return triangleCount
+}
+
+/**
+ * The frame's triangles as vertex data for the GPU: direction xyz then height
+ * in metres, four floats a vertex, three vertices a triangle.
+ *
+ * Nothing here is screen space and nothing is shaded. The two values a vertex
+ * carries are the two that never change, so exaggeration, rotation and colour
+ * are all the shaders' business.
+ */
+export let surfaceVertices = new Float32Array(0)
+let triangleCount = 0
+let faceCapacity = 0
+
+function reserveFaces(needed: number) {
+  if (needed <= faceCapacity) return
+  let next = faceCapacity === 0 ? 8192 : faceCapacity
+  while (next < needed) next *= 2
+  const grown = new Float32Array(next * 12)
+  grown.set(surfaceVertices)
+  surfaceVertices = grown
+  faceCapacity = next
+}
+
+/**
+ * Record one triangle.
+ *
+ * Back-facing triangles are dropped by the sign of the screen-space area: the
+ * surface is a radial height field, so it is star-shaped about the centre and
+ * anything turned away is covered by something in front of it. The depth buffer
+ * would sort them out regardless, but not emitting them halves the work.
+ */
+function face(a: number, b: number, c: number) {
+  const ax = screenX[a]
+  const ay = screenY[a]
+  const bx = screenX[b]
+  const by = screenY[b]
+  const cx = screenX[c]
+  const cy = screenY[c]
+
+  // Positive area is front-facing in this downward-y screen space; zero is
+  // degenerate, which is what a triangle collapsed onto a pole becomes.
+  if ((bx - ax) * (cy - ay) - (by - ay) * (cx - ax) <= 1e-12) return
+
+  reserveFaces(triangleCount + 1)
+  let at = triangleCount * 12
+  for (const v of [a, b, c]) {
+    const d = v * 3
+    surfaceVertices[at] = dirs[d]
+    surfaceVertices[at + 1] = dirs[d + 1]
+    surfaceVertices[at + 2] = dirs[d + 2]
+    surfaceVertices[at + 3] = lifts[v] * EARTH_RADIUS_M
+    at += 4
+  }
+  triangleCount++
+  stats.triangles++
 }
 
 /** Throw the cache away and lay the base octahedron down again. */
@@ -392,7 +481,7 @@ function select(a: number, b: number, c: number, level: number) {
  * nothing yet carry the silhouette - are not starved.
  */
 function oversized(a: number, b: number, c: number): boolean {
-  const limit = SPLIT_SAMPLES * SPLIT_SAMPLES
+  const limit = SPLIT_PIXELS * SPLIT_PIXELS
   return (
     edgeLength2(a, b) > limit ||
     edgeLength2(b, c) > limit ||
@@ -403,8 +492,8 @@ function oversized(a: number, b: number, c: number): boolean {
 function edgeLength2(i: number, j: number): number {
   const dx = screenX[i] - screenX[j]
   const dy = screenY[i] - screenY[j]
-  // Depth is in globe radii; the scale carries it into buffer samples.
-  const dz = (screenZ[i] - screenZ[j]) * scaleX
+  // Depth is in globe radii; the radius carries it into pixels.
+  const dz = (camZ[i] - camZ[j]) * radiusPx
   return dx * dx + dy * dy + FORESHORTEN * dz * dz
 }
 
@@ -424,18 +513,18 @@ function culled(a: number, b: number, c: number, level: number): boolean {
   // except for ground displaced past the silhouette, which the slack allows
   // for. Whatever survives and still faces away is dropped by the rasteriser's
   // own winding test.
-  const nearest = Math.max(screenZ[a], Math.max(screenZ[b], screenZ[c]))
+  const nearest = Math.max(camZ[a], Math.max(camZ[b], camZ[c]))
   if (nearest + slack < 0) return true
 
-  const margin = slack * scaleX
+  const margin = slack * radiusPx
   const minX = Math.min(screenX[a], Math.min(screenX[b], screenX[c])) - margin
-  if (minX > bufferWidth) return true
+  if (minX > viewWidth) return true
   const maxX = Math.max(screenX[a], Math.max(screenX[b], screenX[c])) + margin
   if (maxX < 0) return true
 
-  const marginY = slack * scaleY
+  const marginY = slack * radiusPx
   const minY = Math.min(screenY[a], Math.min(screenY[b], screenY[c])) - marginY
-  if (minY > bufferHeight) return true
+  if (minY > viewHeight) return true
   const maxY = Math.max(screenY[a], Math.max(screenY[b], screenY[c])) + marginY
   return maxY < 0
 }
@@ -449,6 +538,7 @@ function project(v: number) {
   // when it was created. Ask again; it costs one lookup and stops as soon as
   // the answer is as good as it is going to get.
   if (liftLevel[v] < wantLevel[v]) sampleLift(v)
+  if (liftLevel[v] > stats.detail) stats.detail = liftLevel[v]
 
   const at = v * 3
   // Displacing here rather than in the cache keeps exaggeration free: the
@@ -462,9 +552,11 @@ function project(v: number) {
   const z1 = x * sinLon + z * cosLon
   const cy = y * cosLat - z1 * sinLat
 
-  screenX[v] = x1 * scaleX + offsetX
-  screenY[v] = offsetY - cy * scaleY
-  screenZ[v] = y * sinLat + z1 * cosLat
+  camX[v] = x1
+  camY[v] = cy
+  camZ[v] = y * sinLat + z1 * cosLat
+  screenX[v] = centreX + x1 * radiusPx
+  screenY[v] = centreY - cy * radiusPx
 }
 
 /**
@@ -605,7 +697,9 @@ function reserve(needed: number) {
   lifts = regrow(lifts, next)
   screenX = regrow(screenX, next)
   screenY = regrow(screenY, next)
-  screenZ = regrow(screenZ, next)
+  camX = regrow(camX, next)
+  camY = regrow(camY, next)
+  camZ = regrow(camZ, next)
 
   const nextProjected = new Uint32Array(next)
   nextProjected.set(projected)
@@ -633,7 +727,7 @@ function regrow(
 }
 
 /**
- * The outline of the leaf being drawn, and its settled grid columns.
+ * The outline of the leaf being drawn.
  *
  * Fixed and reused, so drawing allocates nothing. Three edges each descending
  * at most `MAX_STITCH_DEPTH` levels bounds the outline at 3 * 2^4 vertices,
@@ -641,7 +735,6 @@ function regrow(
  */
 const OUTLINE_LIMIT = 3 * (1 << MAX_STITCH_DEPTH)
 const outline = new Uint32Array(OUTLINE_LIMIT)
-const outlineU = new Float32Array(OUTLINE_LIMIT)
 let outlineCount = 0
 
 /**
@@ -652,61 +745,25 @@ let outlineCount = 0
  * that is just the three corners; where one was, the extra vertices are exactly
  * the ones the neighbour drew to, so the two meet with no gap between them.
  */
-function emit(target: GBuffer, a: number, b: number, c: number) {
+function emit(a: number, b: number, c: number) {
   outlineCount = 0
   walk(a, b, 0)
   walk(b, c, 0)
   walk(c, a, 0)
   const n = outlineCount
 
-  // Longitude wraps but the coordinate does not, so a triangle straddling the
-  // antimeridian would otherwise interpolate the wrong way round the world -
-  // back across every meridian instead of forward over the join. Carrying the
-  // western corners past 1 keeps the walk going forwards; sampling wraps them
-  // back.
-  let lowest = Infinity
-  let highest = -Infinity
-  for (let i = 0; i < n; i++) {
-    const u = coords[outline[i] * 2]
-    outlineU[i] = u
-    // A pole's column is NaN, and fails both of these.
-    if (u < lowest) lowest = u
-    if (u > highest) highest = u
-  }
-  if (highest - lowest > 0.5) {
-    for (let i = 0; i < n; i++) if (outlineU[i] < 0.5) outlineU[i] += 1
-  }
-  // A pole takes the meridian halfway between its neighbours around the
-  // outline, which is the one running up the middle of this triangle.
-  for (let i = 0; i < n; i++) {
-    if (outlineU[i] === outlineU[i]) continue
-    const before = outlineU[(i + n - 1) % n]
-    const after = outlineU[(i + 1) % n]
-    outlineU[i] = (before + after) / 2
-  }
+  // The tiles that gave these corners their height are the ones this patch
+  // will want again as it refines. Asking once per leaf rather than once per
+  // vertex is what keeps the request count down. A pole has no meridian of its
+  // own, so ask from a corner that has one - a triangle has at most one pole.
+  const anchor = coords[a * 2] === coords[a * 2] ? a : coords[b * 2] === coords[b * 2] ? b : c
+  wantAt(wantLevel[a], coords[anchor * 2], coords[anchor * 2 + 1])
 
   // A fan from the first corner. Every edge of it is either an outline edge -
   // shared, and matched vertex for vertex - or interior to this leaf, so
   // nothing here can open a crack.
-  const p = outline[0]
-  const pu = outlineU[0]
-  const pv = coords[p * 2 + 1]
-
-  // The shading pass is about to read this patch at `detailLevel`, per pixel.
-  // Asking here rather than there is what keeps the request count down to one
-  // per leaf instead of one per sample, and the leaves are exactly the ground
-  // that will be shaded.
-  wantAt(detailLevel, pu, pv)
   for (let i = 1; i < n - 1; i++) {
-    const q = outline[i]
-    const r = outline[i + 1]
-    rasteriseTriangle(
-      target,
-      screenX[p], screenY[p], screenZ[p], pu, pv,
-      screenX[q], screenY[q], screenZ[q], outlineU[i], coords[q * 2 + 1],
-      screenX[r], screenY[r], screenZ[r], outlineU[i + 1], coords[r * 2 + 1],
-    )
-    stats.triangles++
+    face(outline[0], outline[i], outline[i + 1])
   }
 }
 

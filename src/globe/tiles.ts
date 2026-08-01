@@ -414,6 +414,42 @@ function evict() {
 // --- Requests -------------------------------------------------------------
 
 /**
+ * Levels to hold in full, everywhere, whatever the camera is looking at.
+ *
+ * These are the levels that ship in the package, so there is nothing to gain by
+ * rationing them: the whole of level 2 is 2.7 MB, it is contiguous in its own
+ * file, and coalescing turns it into a single range request. Fetching it up
+ * front means the globe is never coarse in one place because you happened to
+ * arrive from another, and panning never has to wait.
+ *
+ * Past this, detail is fetched for what is on screen, as before.
+ */
+export const RESIDENT_LEVELS = 2
+
+/**
+ * Ask for everything up to `RESIDENT_LEVELS`, everywhere.
+ *
+ * Called every frame and costs a map lookup per tile once they have landed -
+ * a hundred and sixty of them, which is nothing. Levels whose index has not
+ * been read yet open here and are picked up on a later frame.
+ */
+export function prefetchResident() {
+  const it = archive
+  if (!it) return
+  for (let z = 1; z <= Math.min(RESIDENT_LEVELS, it.levels - 1); z++) {
+    if (it.status[z] !== 'ready') {
+      openLevel(z)
+      continue
+    }
+    const across = tilesAcross(z)
+    const down = tilesDown(z)
+    for (let y = 0; y < down; y++) {
+      for (let x = 0; x < across; x++) want(z, x, y)
+    }
+  }
+}
+
+/**
  * Note that a tile would be useful this frame.
  *
  * Nothing is fetched here: the frame collects what it wants and `pump` decides

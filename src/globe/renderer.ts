@@ -9,14 +9,9 @@ import {
   strokeMesh,
   type Camera,
 } from './projection'
-import {
-  shadeSurface,
-  surfaceDetail,
-  surfaceTriangles,
-  FLAT_LAND_CSS,
-  type SurfaceImage,
-} from './surface'
-import { pump, tick as tickTerrain } from './tiles'
+import { paintSphere, FLAT_LAND_CSS } from './surface'
+import { drawSurface, meshStats } from './mesh'
+import { prefetchResident, pump, tick as tickTerrain } from './tiles'
 import type { Shape } from './shapes'
 import { drawOrbits, type Orbit } from './orbits'
 import { drawLabels, type Label } from './labels'
@@ -61,12 +56,6 @@ const LIMB = 'rgba(150, 200, 250, 0.75)'
 const GRATICULE = 'rgba(190, 220, 250, 0.22)'
 const COAST = 'rgba(200, 226, 250, 0.7)'
 
-// The metal is shaded at a fraction of display resolution and scaled up. It is
-// all smooth gradient, so that costs nothing visually - every crisp edge in the
-// final image comes from the vector passes below. The sample ceiling keeps the
-// pass at roughly 4ms even on a large display.
-const SHADE = { scale: 0.5, maxSamples: 160_000 }
-
 /**
  * Where the globe sits on screen for a given viewport and store state.
  *
@@ -101,34 +90,31 @@ export function renderGlobe(
   const { cx, cy, radius } = camera
 
   tickTerrain()
-  const surface = shadeSurface(camera, viewport, SHADE, state)
-  // Selection has now had its say about which tiles this view wants, so the
-  // fetches go out here - after the frame, in the order it decided.
-  pump()
-  if (surface?.terrain) {
-    actions.setMeshTriangles(surfaceTriangles())
-    actions.setDetail(surfaceDetail())
-  }
-  if (surface) blit(ctx, surface, surface.pixels)
 
-  // Displaced terrain already knows which of its samples are land, from the
-  // same elevation that gave them their shape, so it arrives coloured.
-  //
-  // The bare sphere does not - there is no elevation to ask - so it falls back
-  // to the real coastline geometry, which keeps the edge on the stroked
-  // outline and lets the canvas antialias it. Only seen before the elevation
-  // arrives, or if it never does.
-  if (!surface?.terrain) {
-    if (state.surface === 'flat') {
-      // Flat wants land solid, not absent, so fill rather than cut.
-      ctx.fillStyle = FLAT_LAND_CSS
-      fillPolygons(ctx, landfill, camera)
-    } else {
-      ctx.globalCompositeOperation = 'destination-out'
-      ctx.fillStyle = '#000'
-      fillPolygons(ctx, landfill, camera)
-      ctx.globalCompositeOperation = 'source-over'
-    }
+  // The surface goes to the GPU, on its own canvas behind this one. It is a
+  // static mesh, so this culls, draws, and - for the first second of a session
+  // - fills in whatever chunks the frame's budget allows.
+  drawSurface(camera, viewport, state.exaggeration)
+
+  // The shipped levels are held in full, everywhere, which is exactly what the
+  // mesh is built to match.
+  prefetchResident()
+  pump()
+
+  const mesh = meshStats()
+  // Held back until the whole mesh is up rather than as the first chunk lands:
+  // the fallback disc is drawn on this canvas, which sits over the GPU one, so
+  // the two cannot share the frame - it is all of one or all of the other.
+  const terrain = mesh.built === mesh.chunks
+  if (terrain) {
+    actions.setMeshTriangles(mesh.triangles)
+    actions.setDetail(Math.max(0, mesh.detail))
+  } else {
+    // Nothing has arrived yet: a plain disc, with the land filled from the
+    // coastline geometry so the continents are there from the first frame.
+    paintSphere(ctx, camera)
+    ctx.fillStyle = FLAT_LAND_CSS
+    fillPolygons(ctx, landfill, camera)
   }
 
   ctx.lineWidth = 1.25
@@ -138,14 +124,20 @@ export function renderGlobe(
   ctx.strokeStyle = GRATICULE
   strokeMesh(ctx, graticule, camera)
 
-  ctx.strokeStyle = COAST
-  strokeMesh(ctx, coastlines, camera)
+  // The land outlines, from the coastline dataset rather than from the terrain.
+  // The two do not quite agree - the elevation puts the waterline where its own
+  // samples say - so being able to drop these is being able to see the ground
+  // on its own terms.
+  if (state.outlines) {
+    ctx.strokeStyle = COAST
+    strokeMesh(ctx, coastlines, camera)
+  }
 
   // Sphere silhouette, over the shaded limb. Displaced terrain has a
   // silhouette of its own - that is rather the point of displacing it - and a
   // perfect circle drawn over the top would saw straight through every
   // mountain standing past it.
-  if (!surface?.terrain) {
+  if (!terrain) {
     ctx.beginPath()
     ctx.arc(cx, cy, radius, 0, Math.PI * 2)
     ctx.strokeStyle = LIMB
@@ -181,42 +173,4 @@ export function renderGlobe(
   if (scene.labels?.length) {
     drawLabels(ctx, camera, scene.labels, scene.time ?? 0)
   }
-}
-
-// Scratch canvas used to scale a shaded buffer up on blit. putImageData
-// ignores the current transform, so it cannot write to the main canvas
-// directly, and it ignores the composite operation too - hence the round trip
-// through drawImage, which honours both.
-let scratch: HTMLCanvasElement | null = null
-let scratchCtx: CanvasRenderingContext2D | null = null
-
-function blit(
-  ctx: CanvasRenderingContext2D,
-  image: SurfaceImage,
-  data: Uint8ClampedArray<ArrayBuffer>,
-) {
-  if (!scratch) {
-    if (typeof document === 'undefined') return
-    scratch = document.createElement('canvas')
-    scratchCtx = scratch.getContext('2d')
-  }
-  if (!scratch || !scratchCtx) return
-
-  if (scratch.width !== image.width || scratch.height !== image.height) {
-    scratch.width = image.width
-    scratch.height = image.height
-  }
-
-  scratchCtx.putImageData(
-    new ImageData(data.subarray(0, image.width * image.height * 4), image.width, image.height),
-    0,
-    0,
-  )
-
-  // The buffer is only ever scaled up by about half again, so bilinear
-  // resampling is indistinguishable from the expensive filter here, and on a
-  // software rasteriser the high quality setting costs several times as much.
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'low'
-  ctx.drawImage(scratch, 0, 0, image.width, image.height, image.x, image.y, image.w, image.h)
 }

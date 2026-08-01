@@ -98,7 +98,12 @@ export type ModelOptions = {
   size?: number
   /** Rotation about local up in degrees; 0 faces north. */
   heading?: number
-  /** Degrees per second added to the heading. */
+  /**
+   * Degrees added to the heading per second *of the scene clock*, which is the
+   * same clock the orbits run on and is normally far faster than real time. A
+   * figure that reads as a slow turn is a blur once the scale is applied, so
+   * divide by it - `demoModels.ts` has a helper that does.
+   */
   spin?: number
 }
 

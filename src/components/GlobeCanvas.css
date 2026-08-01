@@ -9,3 +9,20 @@
 .globe-canvas:active {
   cursor: grabbing;
 }
+
+/* The GL surface sits behind the 2D overlay; both fill the stack. */
+.globe-stack {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.globe-stack > .globe-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.globe-canvas--gl {
+  /* Pointer events belong to the 2D canvas on top, which owns the input. */
+  pointer-events: none;
+}

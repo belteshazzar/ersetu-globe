@@ -6,6 +6,7 @@ import { DEMO_SHAPES } from '../globe/demoShapes'
 import { DEMO_ORBITS, DEMO_TIME_SCALE } from '../globe/demoOrbits'
 import { DEMO_LABELS } from '../globe/demoLabels'
 import { openTerrain } from '../globe/tiles'
+import { initGl } from '../globe/gl'
 import { loadDemoModels } from '../globe/demoModels'
 import type { ModelPlacement } from '../globe/models'
 import './GlobeCanvas.css'
@@ -19,7 +20,12 @@ import './GlobeCanvas.css'
 const TERRAIN_BASE = `${import.meta.env.BASE_URL}terrain`
 
 const AUTO_ROTATE_SPEED = 0.0035 // radians per frame
-const DRAG_SENSITIVITY = 0.005 // radians per CSS pixel
+/**
+ * Radians of rotation per CSS pixel dragged, at a zoom of one. Divided by the
+ * zoom in use, so it is the sensitivity at the widest view rather than a
+ * constant.
+ */
+const DRAG_SENSITIVITY = 0.005
 
 /**
  * Owns the <canvas>: sizing, the animation loop, and pointer input.
@@ -30,6 +36,9 @@ const DRAG_SENSITIVITY = 0.005 // radians per CSS pixel
  */
 export function GlobeCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  // The globe's surface is drawn by WebGL on its own canvas, behind the 2D one
+  // that carries the coastlines, orbits and labels.
+  const glRef = useRef<HTMLCanvasElement>(null)
   const viewportRef = useRef<Viewport>({ width: 0, height: 0, dpr: 1 })
   // Latest pointer position in CSS pixels, or null when it is off the canvas.
   const pointerRef = useRef<{ x: number; y: number } | null>(null)
@@ -59,6 +68,14 @@ export function GlobeCanvas() {
     openTerrain(TERRAIN_BASE).catch((error: unknown) => {
       console.warn('Terrain unavailable; shading the globe flat.', error)
     })
+  }, [])
+
+  useEffect(() => {
+    const canvas = glRef.current
+    if (!canvas) return
+    if (!initGl(canvas)) {
+      console.warn('WebGL unavailable; the globe will draw without its surface.')
+    }
   }, [])
 
   // Keep the backing store sized to the element and the display density.
@@ -95,6 +112,13 @@ export function GlobeCanvas() {
     let handle = 0
     let last = performance.now()
 
+    // Averaged over a window rather than reported per frame: a single frame's
+    // figure jitters far too much to read, and updating the HUD sixty times a
+    // second to show it would itself be work the figure then reported.
+    let windowStart = last
+    let windowFrames = 0
+    let windowDrawMs = 0
+
     const frame = (now: number) => {
       // Clamp the step so a backgrounded tab does not resume with a jump.
       const delta = Math.min(0.1, (now - last) / 1000)
@@ -108,6 +132,7 @@ export function GlobeCanvas() {
       if (viewport.width > 0) {
         const next = appStore.getState()
         ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0)
+        const drawStart = performance.now()
         renderGlobe(ctx, viewport, next, {
           shapes: DEMO_SHAPES,
           orbits: DEMO_ORBITS,
@@ -115,6 +140,19 @@ export function GlobeCanvas() {
           models: modelsRef.current,
           time: next.elapsed * DEMO_TIME_SCALE,
         })
+        windowDrawMs += performance.now() - drawStart
+        windowFrames++
+        // A quarter second is long enough to average out the jitter and short
+        // enough that the number still tracks what the globe is doing.
+        if (now - windowStart >= 250) {
+          actions.setPerformance(
+            (windowFrames * 1000) / (now - windowStart),
+            windowDrawMs / windowFrames,
+          )
+          windowStart = now
+          windowFrames = 0
+          windowDrawMs = 0
+        }
 
         // Resolved every frame rather than only on pointermove, so the
         // reading stays true while the globe turns under a still cursor.
@@ -153,9 +191,16 @@ export function GlobeCanvas() {
     const onPointerMove = (event: PointerEvent) => {
       pointerRef.current = { x: event.offsetX, y: event.offsetY }
       if (!dragging) return
+      // Scaled by the zoom, so that a pixel of pointer movement is the same
+      // distance of ground however far in you are. The globe is drawn `zoom`
+      // times larger, so a given angle carries the surface that many times
+      // further across the screen - left unscaled, dragging at eight times
+      // magnification throws the ground past eight times as fast, which is the
+      // point at which it stops feeling like dragging a globe at all.
+      const radians = DRAG_SENSITIVITY / appStore.getState().zoom
       actions.rotateBy(
-        (event.clientX - lastX) * -DRAG_SENSITIVITY,
-        (event.clientY - lastY) * DRAG_SENSITIVITY,
+        (event.clientX - lastX) * -radians,
+        (event.clientY - lastY) * radians,
       )
       lastX = event.clientX
       lastY = event.clientY
@@ -195,5 +240,10 @@ export function GlobeCanvas() {
     }
   }, [])
 
-  return <canvas ref={canvasRef} className="globe-canvas" />
+  return (
+    <div className="globe-stack">
+      <canvas ref={glRef} className="globe-canvas globe-canvas--gl" />
+      <canvas ref={canvasRef} className="globe-canvas" />
+    </div>
+  )
 }

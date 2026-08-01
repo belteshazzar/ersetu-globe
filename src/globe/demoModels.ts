@@ -11,7 +11,7 @@ import {
   placeOnSurface,
   type ModelPlacement,
 } from './models'
-import { DEMO_ORBITS } from './demoOrbits'
+import { DEMO_ORBITS, DEMO_TIME_SCALE } from './demoOrbits'
 import stationUrl from './data/models/station.json?url'
 import satelliteUrl from './data/models/satellite.json?url'
 import buildingUrl from './data/models/building.json?url'
@@ -19,6 +19,17 @@ import carUrl from './data/models/car.json?url'
 
 const NEW_YORK: [number, number] = [-74.01, 40.71]
 const SALAR_DE_UYUNI: [number, number] = [-67.5, -20.4]
+
+/**
+ * A spin written in degrees per second you can actually count.
+ *
+ * `spin` is applied against the scene clock, which runs at `DEMO_TIME_SCALE` so
+ * that the orbits are worth watching - and a spin left in those units is that
+ * many times faster than it looks on the page. Written straight, `spin: 8` is
+ * three thousand degrees a second: nine turns before you have finished reading
+ * the number.
+ */
+const perSecond = (degrees: number) => degrees / DEMO_TIME_SCALE
 
 /**
  * Fetch the models and place them. Resolves to an empty list rather than
@@ -41,13 +52,18 @@ export async function loadDemoModels(): Promise<ModelPlacement[]> {
   // an orthographic globe looks straight down at whatever is in the middle of
   // the disc. That is worth a little extra size.
   return [
-    // Riding the low orbit, turning slowly to keep its wings to the sun.
-    placeInOrbit(station, DEMO_ORBITS[0], { size: 0.07, spin: 8 }),
-    placeInOrbit(satellite, DEMO_ORBITS[1], { size: 0.05, spin: -14 }),
+    // Riding the low orbit, turning slowly to keep its wings to the sun: one
+    // turn in forty seconds, which is a drift rather than a spin.
+    placeInOrbit(station, DEMO_ORBITS[0], { size: 0.07, spin: perSecond(9) }),
+    placeInOrbit(satellite, DEMO_ORBITS[1], { size: 0.05, spin: perSecond(-14) }),
 
     // Standing on the ground, which means standing on the displaced terrain:
     // both rise and fall with the relief slider.
     placeOnSurface(building, NEW_YORK, { size: 0.05 }),
-    placeOnSurface(car, SALAR_DE_UYUNI, { size: 0.035, heading: 60, spin: 12 }),
+    placeOnSurface(car, SALAR_DE_UYUNI, {
+      size: 0.035,
+      heading: 60,
+      spin: perSecond(18),
+    }),
   ]
 }

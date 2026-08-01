@@ -494,6 +494,29 @@ const TAU = Math.PI * 2
  *   detected from the winding of the collapsed segments and cancelled by
  *   XORing in the limb circle.
  */
+/**
+ * Clip everything drawn after this to the land.
+ *
+ * One path over every ring rather than a fill per polygon, because clipping
+ * intersects: clipping to Africa and then to Asia would leave nothing. The
+ * even-odd rule gives the union so long as the outer rings do not overlap each
+ * other, which landmasses do not, and still cuts each polygon's holes out.
+ *
+ * The caller is expected to have saved the context, and to restore it.
+ */
+export function clipToPolygons(
+  ctx: CanvasRenderingContext2D,
+  mesh: PolygonMesh,
+  camera: Camera,
+) {
+  ctx.beginPath()
+  for (let r = 0; r < mesh.ringOffsets.length - 1; r++) {
+    if (!clipRing(mesh, r, camera)) continue
+    emitRing(ctx, camera)
+  }
+  ctx.clip('evenodd')
+}
+
 export function fillPolygons(
   ctx: CanvasRenderingContext2D,
   mesh: PolygonMesh,

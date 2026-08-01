@@ -1,8 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { createStore } from './createStore'
 
-export type SurfaceStyle = 'metal' | 'flat'
-
 /** Camera/orientation state for the globe, plus general app state. */
 export type AppState = {
   /** Rotation about the polar axis, radians. */
@@ -14,11 +12,13 @@ export type AppState = {
   /** Whether the idle spin animation is running. */
   autoRotate: boolean
   /**
-   * How the surface is coloured. `metal` reflects an environment gradient and
-   * ramps the land by height; `flat` is one colour for land and one for sea,
-   * left to the lighting to give them shape.
+   * Whether the land outlines are drawn over the surface.
+   *
+   * They come from a coastline dataset rather than from the terrain, so at
+   * depth they and the elevation disagree about where the water starts - which
+   * is worth being able to switch off to see the ground on its own.
    */
-  surface: SurfaceStyle
+  outlines: boolean
   /**
    * Triangles the last frame's geometry cost, rounded to the nearest hundred.
    *
@@ -29,6 +29,10 @@ export type AppState = {
   meshTriangles: number
   /** Which level of the terrain pyramid the last frame shaded from. */
   detail: number
+  /** Frames per second, averaged over the last quarter second. */
+  fps: number
+  /** Milliseconds spent drawing one frame, averaged over the same window. */
+  frameMs: number
   /**
    * How far the terrain is displaced, as a multiple of true height.
    *
@@ -59,9 +63,11 @@ const initialState: AppState = {
   latitude: 0.35,
   zoom: 1,
   autoRotate: true,
-  surface: 'flat',
+  outlines: true,
   meshTriangles: 0,
   detail: 0,
+  fps: 0,
+  frameMs: 0,
   exaggeration: 30,
   frame: 0,
   elapsed: 0,
@@ -101,8 +107,8 @@ export const actions = {
   setAutoRotate(autoRotate: boolean) {
     appStore.setState({ autoRotate })
   },
-  setSurface(surface: SurfaceStyle) {
-    appStore.setState({ surface })
+  toggleOutlines() {
+    appStore.setState({ outlines: !appStore.getState().outlines })
   },
   /**
    * Report what the last frame's geometry cost. Called from the render loop, so
@@ -117,6 +123,19 @@ export const actions = {
   },
   setDetail(detail: number) {
     if (detail !== appStore.getState().detail) appStore.setState({ detail })
+  },
+  /**
+   * Report how the render loop is keeping up. Called a few times a second
+   * rather than every frame: at sixty frames a second an unrounded figure would
+   * differ every time and drag the HUD through a re-render with it.
+   */
+  setPerformance(fps: number, frameMs: number) {
+    const roundedFps = Math.round(fps)
+    const roundedMs = Math.round(frameMs * 10) / 10
+    const previous = appStore.getState()
+    if (roundedFps !== previous.fps || roundedMs !== previous.frameMs) {
+      appStore.setState({ fps: roundedFps, frameMs: roundedMs })
+    }
   },
   setExaggeration(exaggeration: number) {
     appStore.setState({ exaggeration: clamp(exaggeration, 0, MAX_EXAGGERATION) })
