@@ -427,16 +427,32 @@ function evict() {
 export const RESIDENT_LEVELS = 2
 
 /**
- * Ask for everything up to `RESIDENT_LEVELS`, everywhere.
+ * Ask for everything up to `throughLevel`, everywhere, one rung at a time.
+ *
+ * The caller earns each level by finishing the one below it, so the globe
+ * arrives as a ladder - a smooth sphere at 78 km, then 39, then 20 - rather
+ * than all at once. Asking for the lot up front is faster to the finished
+ * article and much worse to watch: the fetches race, the coarse levels are
+ * overtaken, and the first thing to reach the screen is the last rung, which
+ * lands as a jump from a bare sphere to full relief in a single frame.
  *
  * Called every frame and costs a map lookup per tile once they have landed -
  * a hundred and sixty of them, which is nothing. Levels whose index has not
  * been read yet open here and are picked up on a later frame.
  */
-export function prefetchResident() {
+export function prefetchResident(throughLevel: number) {
   const it = archive
   if (!it) return
+  let earned = throughLevel
   for (let z = 1; z <= Math.min(RESIDENT_LEVELS, it.levels - 1); z++) {
+    // A level that is not deployed is not a rung to wait on: the pyramid is
+    // allowed gaps, and stalling the ladder on one would strand every level
+    // above it.
+    if (it.status[z] === 'missing') {
+      earned++
+      continue
+    }
+    if (z > earned) break
     if (it.status[z] !== 'ready') {
       openLevel(z)
       continue

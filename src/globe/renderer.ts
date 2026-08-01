@@ -56,6 +56,26 @@ const LIMB = 'rgba(150, 200, 250, 0.75)'
 const GRATICULE = 'rgba(190, 220, 250, 0.22)'
 const COAST = 'rgba(200, 226, 250, 0.7)'
 
+/** How long the bare sphere takes to dissolve into the meshed one, in seconds. */
+const HANDOVER_SECONDS = 0.6
+
+/**
+ * When the mesh first became whole, on the store's clock, or negative until it
+ * did. Held here rather than in the store because nothing outside this file has
+ * any use for it: it is a property of the picture, not of the application.
+ */
+let handoverAt = -1
+
+/**
+ * Latched once the dissolve has finished, because Reset puts the store's clock
+ * back to zero: without this, resetting an hour into a session would find the
+ * elapsed time behind the handover again and bring the loading sphere back for
+ * an hour. The terrain is still there; there is nothing to load.
+ */
+let handedOver = false
+
+const clamp01 = (value: number) => (value < 0 ? 0 : value > 1 ? 1 : value)
+
 /**
  * Where the globe sits on screen for a given viewport and store state.
  *
@@ -96,25 +116,44 @@ export function renderGlobe(
   // - fills in whatever chunks the frame's budget allows.
   drawSurface(camera, viewport, state.exaggeration)
 
-  // The shipped levels are held in full, everywhere, which is exactly what the
-  // mesh is built to match.
-  prefetchResident()
+  const mesh = meshStats()
+  // The whole mesh has to exist before it can be shown, because the fallback
+  // disc is drawn on this canvas, which sits over the GPU one - the two cannot
+  // share a frame, so it is all of one or all of the other.
+  const whole = mesh.built === mesh.chunks
+
+  // One rung at a time: the next level is only worth fetching once the mesh has
+  // finished with the one below it. Before that the ladder stays where it is,
+  // and the coarse globe is on screen while the finer tiles are still in the
+  // air rather than after them.
+  prefetchResident(whole ? mesh.detail + 1 : 0)
   pump()
 
-  const mesh = meshStats()
-  // Held back until the whole mesh is up rather than as the first chunk lands:
-  // the fallback disc is drawn on this canvas, which sits over the GPU one, so
-  // the two cannot share the frame - it is all of one or all of the other.
-  const terrain = mesh.built === mesh.chunks
-  if (terrain) {
+  if (whole) {
     actions.setMeshTriangles(mesh.triangles)
     actions.setDetail(Math.max(0, mesh.detail))
-  } else {
-    // Nothing has arrived yet: a plain disc, with the land filled from the
-    // coastline geometry so the continents are there from the first frame.
+    if (handoverAt < 0) handoverAt = state.elapsed
+  }
+
+  // Dissolved rather than cut. The two are painted to match, so a short fade
+  // reads as the sphere gaining its ground rather than as one picture being
+  // swapped for another.
+  let cover = 0
+  if (!handedOver) {
+    cover =
+      handoverAt < 0
+        ? 1
+        : 1 - clamp01((state.elapsed - handoverAt) / HANDOVER_SECONDS)
+    if (cover <= 0) handedOver = true
+  }
+  if (cover > 0) {
+    // A plain disc, with the land filled from the coastline geometry so the
+    // continents are there from the first frame.
+    ctx.globalAlpha = cover
     paintSphere(ctx, camera)
     ctx.fillStyle = FLAT_LAND_CSS
     fillPolygons(ctx, landfill, camera)
+    ctx.globalAlpha = 1
   }
 
   ctx.lineWidth = 1.25
@@ -136,12 +175,14 @@ export function renderGlobe(
   // Sphere silhouette, over the shaded limb. Displaced terrain has a
   // silhouette of its own - that is rather the point of displacing it - and a
   // perfect circle drawn over the top would saw straight through every
-  // mountain standing past it.
-  if (!terrain) {
+  // mountain standing past it, so it fades out with the disc it belongs to.
+  if (cover > 0) {
+    ctx.globalAlpha = cover
     ctx.beginPath()
     ctx.arc(cx, cy, radius, 0, Math.PI * 2)
     ctx.strokeStyle = LIMB
     ctx.stroke()
+    ctx.globalAlpha = 1
   }
 
   // Surface overlays go through the same horizon clipping as the coastlines,
