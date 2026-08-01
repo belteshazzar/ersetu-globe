@@ -19,7 +19,16 @@ import './GlobeCanvas.css'
  */
 const TERRAIN_BASE = `${import.meta.env.BASE_URL}terrain`
 
-const AUTO_ROTATE_SPEED = 0.0035 // radians per frame
+/**
+ * Radians of idle spin per second - per second, not per frame, so the globe
+ * turns at the same rate whatever the display is doing. As radians per frame it
+ * came out at 0.21 a second on a sixty hertz panel and twice that on a hundred
+ * and twenty, which is the same bug as animating anything off the frame count.
+ *
+ * A shade under half a degree of longitude a frame at sixty: one revolution in
+ * thirty seconds.
+ */
+const AUTO_ROTATE_SPEED = 0.21
 /**
  * Radians of rotation per CSS pixel dragged, at a zoom of one. Divided by the
  * zoom in use, so it is the sensitivity at the widest view rather than a
@@ -125,7 +134,9 @@ export function GlobeCanvas() {
       last = now
 
       const state = appStore.getState()
-      if (state.autoRotate) actions.rotateBy(AUTO_ROTATE_SPEED, 0)
+      // The same clamped step the rest of the animation runs on, so a
+      // backgrounded tab resumes where it left off rather than snapping round.
+      if (state.autoRotate) actions.rotateBy(AUTO_ROTATE_SPEED * delta, 0)
       actions.tick(delta)
 
       const viewport = viewportRef.current
